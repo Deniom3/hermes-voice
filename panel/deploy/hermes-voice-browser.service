@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes voice panel: живой браузер (Chrome на VNC-дисплее :1, CDP 9223)
+Documentation=file:///opt/hermes-voice/README.md
+After=network-online.target vncserver@:1.service
+Wants=network-online.target vncserver@:1.service
+
+[Service]
+Type=simple
+# пользователь, владеющий VNC-сессией и профилем Chrome
+User=hermes
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=%h/.Xauthority
+ExecStart=/usr/local/bin/start-hermes-chrome-cdp.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

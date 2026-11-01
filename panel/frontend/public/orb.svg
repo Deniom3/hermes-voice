@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Значок Hermes: тот же орб, что в панели, но заточенный под мелкий размер —
+       один яркий пояс, чёткий край сферы, луна на тёмном участке, меньше свечения. -->
+  <defs>
+    <radialGradient id="glow" cx="42%" cy="36%" r="68%">
+      <stop offset="0%" stop-color="#eaf8ff"/>
+      <stop offset="34%" stop-color="#9ad4ff"/>
+      <stop offset="68%" stop-color="#4a83d6"/>
+      <stop offset="100%" stop-color="#1b3560"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="60%" stop-color="#6fb6ff" stop-opacity=".38"/>
+      <stop offset="100%" stop-color="#6fb6ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0b1220"/>
+  <circle cx="32" cy="32" r="27" fill="url(#halo)"/>
+
+  <!-- Дальняя орбита: одна, светлее фона, чтобы читалась в 32 px -->
+  <ellipse cx="32" cy="32" rx="28" ry="11" fill="none" stroke="#c3a6ff"
+           stroke-opacity=".8" stroke-width="2"/>
+
+  <!-- Сфера: тёмная окантовка держит силуэт на мелком размере -->
+  <circle cx="32" cy="32" r="18.5" fill="#0d1b33"/>
+  <circle cx="32" cy="32" r="17.5" fill="url(#glow)"/>
+
+  <!-- Ближний пояс: главный опознавательный элемент -->
+  <ellipse cx="32" cy="34" rx="24" ry="8.5" fill="none" stroke="#3ff2cf"
+           stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Луна на тёмной нижней доле, а не на блике -->
+  <circle cx="47.5" cy="45.5" r="4.4" fill="#0b1220"/>
+  <circle cx="47.5" cy="45.5" r="3.4" fill="#eef7ff"/>
+
+  <!-- Блик -->
+  <circle cx="25" cy="24.5" r="3.6" fill="#ffffff" fill-opacity=".62"/>
+</svg>

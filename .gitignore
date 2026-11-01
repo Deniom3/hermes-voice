@@ -1,0 +1,21 @@
+# Сборка и зависимости
+node_modules
+dist/
+__pycache__/
+*.pyc
+
+# Виртуальные окружения
+.venv/
+.venv-wake/
+
+# Локальные настройки и секреты
+.env
+.env.bak*
+
+# Логи и дампы реплик
+*.log
+voice-dumps/
+dumps/
+.coverage
+.venv-ci/
+.venv-lint/

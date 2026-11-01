@@ -1,0 +1,18 @@
+[Unit]
+Description=UI-панель голосового контура (микрофон в браузере, окна, VNC)
+Documentation=file:///opt/hermes-voice/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hermes-voice/panel
+EnvironmentFile=-/opt/hermes-voice/.env
+ExecStart=/usr/bin/python3 /opt/hermes-voice/panel/server.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/voice-panel.log
+StandardError=append:/var/log/voice-panel.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+#!/bin/sh
+# Автозапуск агента Hermes на Яндекс Станции.
+# Ставится в /etc/init.d/S99zhermes; откат — удалить файл и перезагрузить колонку.
+AGENT=/data/opt/hermes-station/voice-agent
+LOG=/tmp/hermes-agent.log
+PIDF=/tmp/zhermes.pid
+# Адрес хаба и имя устройства — в /data/opt/hermes-station/agent.env,
+# чтобы не держать сетевые адреса и имена в репозитории.
+[ -f /data/opt/hermes-station/agent.env ] && . /data/opt/hermes-station/agent.env
+VOICE_HUB_ADDR="${VOICE_HUB_ADDR:-127.0.0.1}"
+VOICE_DEVICE_NAME="${VOICE_DEVICE_NAME:-lite-1}"
+VOICE_THRESHOLD="${VOICE_THRESHOLD:-0.95}"
+SERVER="ws://${VOICE_HUB_ADDR}:8796/ws"
+
+start() {
+    [ -x "$AGENT" ] || exit 0
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+        exit 0
+    fi
+    nohup "$AGENT" -server "$SERVER" -name "$VOICE_DEVICE_NAME" \
+        -threshold "$VOICE_THRESHOLD" -v >>"$LOG" 2>&1 &
+    echo $! >"$PIDF"
+}
+
+stop() {
+    if [ -f "$PIDF" ]; then
+        kill "$(cat "$PIDF")" 2>/dev/null
+        rm -f "$PIDF"
+    fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

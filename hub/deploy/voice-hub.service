@@ -1,0 +1,17 @@
+[Unit]
+Description=Голосовой хаб: единый WebSocket для колонок и панели
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# рабочая копия серверной части (см. docs/deploy.md)
+WorkingDirectory=/srv/hermes-station/server
+ExecStart=/opt/hermes-voice/.venv-wake/bin/python /srv/hermes-station/server/voice_hub.py --port 8796 --out /tmp/station-hub
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

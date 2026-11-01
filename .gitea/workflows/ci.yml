@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: Тесты (unittest)
+    runs-on: voice-ci
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Версия Python
+        run: python3 --version
+
+      - name: Зависимости
+        run: |
+          python3 -m venv .venv-ci
+          .venv-ci/bin/pip install --upgrade pip
+          .venv-ci/bin/pip install -r requirements.txt
+
+      - name: Тесты
+        run: .venv-ci/bin/python -m unittest discover -s hub/tests -t .
+
+  lint:
+    name: Линт (мёртвый код)
+    runs-on: voice-ci
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Установка
+        run: |
+          python3 -m venv .venv-lint
+          .venv-lint/bin/pip install pyflakes vulture
+
+      - name: pyflakes — неиспользуемые импорты и имена
+        run: .venv-lint/bin/python -m pyflakes hub/*.py hub/tests/*.py
+
+      - name: vulture — код, на который никто не ссылается
+        run: .venv-lint/bin/python -m vulture hub/*.py --min-confidence 80
