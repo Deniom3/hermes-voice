@@ -35,12 +35,14 @@ jobs:
         # Тесты читают hub/config.example.json как рабочий конфиг: на раннере
         # нет /etc/hermes-voice/hub.json, а фразы быстрого маршрута живут
         # только в файле — без него модуль честно отказывается стартовать.
-        env:
-          HUB_CONFIG: ${{ github.workspace }}/hub/config.example.json
-        # Полный лог в файл: без него падение на раннере видно только как
-        # «exit code 1», а анонимно логи GitHub не отдаёт. Хвост и список
-        # упавших тестов уходят в аннотацию, которую видно без авторизации.
+        # Путь задаём в shell от $PWD: выражение ${{ github.workspace }}
+        # в env шага на раннере не доезжало, конфиг молча оставался пустым
+        # и половина маршрутов отвечала None.
         run: |
+          export HUB_CONFIG="$PWD/hub/config.example.json"
+          echo "HUB_CONFIG=$HUB_CONFIG"
+          ls -l "$HUB_CONFIG"
+          python -c "import hub.config as c; print('config path:', c.PATH)"
           set +e
           python -m unittest discover -s hub/tests -t . -v > /tmp/tests.log 2>&1
           code=$?
