@@ -147,9 +147,11 @@ cd hermes-voice
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-cp .env.example .env        # адреса шлюза, агента, HA — плейсхолдеры
-$EDITOR .env
+cp hub/config.example.json /etc/hermes-voice/hub.json   # адреса шлюза, агента, HA, MA
+$EDITOR /etc/hermes-voice/hub.json
 ```
+
+Без root для отладки: `export HUB_CONFIG=$PWD/hub/config.example.json`.
 
 Панель (нужен Node 18+):
 
@@ -178,21 +180,53 @@ GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 \
 
 ## Конфигурация
 
-Все адреса задаются переменными окружения; в коде и документации — плейсхолдеры
+Один файл — `hub.json`: по умолчанию `/etc/hermes-voice/hub.json`, путь
+переопределяется `HUB_CONFIG`. Адреса в коде и примере — плейсхолдеры
 `<hub-host>`, `<speech-host>`, `<station-host>`.
+
+```json
+{
+  "hermes":    { "url": "ws://<hub-host>:9119/api/ws" },
+  "asr":       { "url": "http://<speech-host>:8000/v1/audio/transcriptions", "model": "gigaam-asr" },
+  "tts":       { "url": "http://<speech-host>:8000/v1/audio/speech", "voice": "eugene" },
+  "mqtt":      { "host": "<mqtt-host>", "port": 1883, "user": "mqtt", "prefix": "hermes/stations" },
+  "sendspin":  { "url": "ws://<ma-host>:8927/sendspin", "output": "default" },
+  "wake":      { "model": "/srv/kws/models/...", "stations": { "lite-1": { "mac": "aa:bb:...", "area": "spalnia" } } },
+  "dialog":    { "silence_ms": 900, "hard_silence_ms": 3500 }
+}
+```
+
+| Ключ в `hub.json` | Смысл |
+|---|---|
+| `hermes.url` | WebSocket агента Hermes |
+| `asr.url`, `asr.model` | распознавание (`/v1/audio/transcriptions`) |
+| `tts.url`, `tts.voice`, `tts.volume` | синтез (`/v1/audio/speech`) |
+| `mqtt.*` | брокер, префикс топиков и discovery |
+| `sendspin.url`, `sendspin.output` | Music Assistant и устройство вывода |
+| `wake.*` | модель ключевого слова, пороги и привязки станций |
+| `dialog.*` | пороги конца реплики и окно диалога |
+| `replies.*`, `phrases.*` | произносимые тексты и группы слов маршрута |
+
+**Переопределение из окружения.** Любой ключ файла можно переопределить
+переменной `HUB_<ПУТЬ>`: `mqtt.prefix` → `HUB_MQTT_PREFIX`. Пустое значение
+считается «не задано». Удобно для отладки, но источник истины — файл.
+
+**Что живёт только в окружении** (секреты в `hub.json` не пишем):
 
 | Переменная | Где | Смысл |
 |---|---|---|
-| `VOICE_PORT` | панель | порт панели (8792) |
-| `VOICE_HUB_URL` | панель | WebSocket хаба |
-| `ASR_URL` | хаб | распознавание (`/v1/audio/transcriptions`) |
-| `TTS_URL` | хаб | синтез (`/v1/audio/speech`) |
-| `HERMES_WS_URL` | хаб | агент Hermes (обычно из `hub.json`) |
-| `HERMES_DASH_TOKEN_FILE` | хаб | файл с токеном агента |
+| `HUB_CONFIG` | хаб | путь к файлу конфига |
 | `HASS_URL`, `HASS_TOKEN` | хаб | Home Assistant; без них быстрый дом выключен |
-| `VOICE_SILENCE_MS`, `VOICE_HARD_SILENCE_MS`, `SMART_TURN_THRESHOLD` | хаб | пороги конца реплики |
+| `MQTT_PASSWORD` | хаб | пароль брокера |
+| `HERMES_DASH_TOKEN_FILE` | хаб | файл с токеном агента |
+| `MA_MCP_BIN` | хаб | путь к `music-assistant-mcp` |
+| `VOICE_PORT`, `VOICE_HUB_URL` | панель | порт панели и адрес хаба |
 
-Полный список — `.env.example` и [docs/deploy.md](docs/deploy.md).
+`ASR_URL` и `TTS_URL` ещё читаются, но только как запасной путь: значение из
+`hub.json` приоритетнее. `VOICE_SILENCE_MS`, `VOICE_HARD_SILENCE_MS` и
+`SMART_TURN_THRESHOLD` больше не используются — эти пороги в `dialog.*`.
+
+Полный пример — `hub/config.example.json`, развёртывание — [docs/deploy.md](docs/deploy.md).
 
 ## Управление
 
