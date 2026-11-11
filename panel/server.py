@@ -22,7 +22,6 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-import websockets
 from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
@@ -303,7 +302,7 @@ async def process_request(connection, request):
         headers["Content-Length"] = str(len(body))
         return Response(200, "OK", headers, body)
     if path.startswith("/warm"):
-        # Прогрев не нужен: ASR и TTS на речевом шлюзе держатся постоянно.
+        # Прогрев не нужен: ASR и TTS на 139 держатся постоянно.
         body = b'{"ok": true, "warming": false}'
         headers = Headers()
         headers["Content-Type"] = "application/json"

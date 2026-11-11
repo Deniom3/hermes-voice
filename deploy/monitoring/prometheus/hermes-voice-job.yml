@@ -1,0 +1,13 @@
+# Фрагмент для prometheus.yml на Nov Monitoring (стек monitoring-nov).
+# Добавить в scrape_configs и перечитать: curl -X POST http://192.168.1.30:9090/-/reload
+- job_name: hermes-voice
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+    - targets:
+        - hub.example.com:8796
+      labels:
+        instance: agent
+        service: hermes-voice

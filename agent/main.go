@@ -8,8 +8,8 @@
 package main
 
 import (
-	"context"
 	"bufio"
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -25,19 +25,21 @@ import (
 
 const (
 	micAddrDefault = "127.0.0.1:9850"
-	tokenDefault      = ""
-	magic             = "HRMA1"
-	frameBytes        = 1024 // чанк vqe_0
-	backoffMin        = 500 * time.Millisecond
-	backoffMax        = 10 * time.Second
+	tokenDefault   = ""
+	magic          = "HRMA1"
+	frameBytes     = 1024 // чанк vqe_0
+	backoffMin     = 500 * time.Millisecond
+	backoffMax     = 10 * time.Second
 )
 
 var (
-	micAddr    = flag.String("mic", micAddrDefault, "адрес IPC maind (yio_audio)")
-	token      = flag.String("token", tokenDefault, "токен канала")
-	bufferSec  = flag.Int("buffer", 10, "глубина буфера при обрыве, секунд")
-	logPath    = flag.String("log", "/tmp/hermes-agent.log", "файл лога")
-	verbose    = flag.Bool("v", false, "подробный лог чанков")
+	micAddr   = flag.String("mic", micAddrDefault, "адрес IPC maind (yio_audio)")
+	token     = flag.String("token", tokenDefault, "токен канала")
+	bufferSec = flag.Int("buffer", 10, "глубина буфера при обрыве, секунд")
+	logPath   = flag.String("log", "/tmp/hermes-agent.log", "файл лога")
+	verbose   = flag.Bool("v", false, "подробный лог чанков")
+	platform  = flag.String("platform", "auto", "платформа: auto|lite1|lite2 (различия LED, звука и микрофона)")
+	micSocket = flag.String("mic-socket", "/data/opt/hermes-station/mic.sock", "Unix-сокет vqe_tap (только plum)")
 )
 
 // ---------- protobuf ----------
@@ -234,8 +236,6 @@ func reportLoop() {
 
 var pendingHolder *pendingBuffer
 
-func buffered() *pendingBuffer { return pendingHolder }
-
 // ---------- микрофон ----------
 
 func subscribeBody() []byte {
@@ -286,6 +286,50 @@ func readMic(stop <-chan struct{}) error {
 		for _, c := range chunks {
 			pendingHolder.push(c)
 		}
+	}
+}
+
+// readMicVQE принимает PCM от LD_PRELOAD-хука vqe_tap.so через Unix-датаграммы.
+// Хук отдаёт S16LE 16 кГц моно кусками до 10 мс и никогда не блокирует maind,
+// поэтому медленный агент не задерживает голосовой тракт Алисы.
+func readMicVQE(stop <-chan struct{}) error {
+	path := *micSocket
+	if path == "" {
+		path = "/data/opt/hermes-station/mic.sock"
+	}
+	_ = os.Remove(path)
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		return fmt.Errorf("mic socket: %w", err)
+	}
+	defer func() {
+		conn.Close()
+		os.Remove(path)
+	}()
+	_ = os.Chmod(path, 0o666)
+	log.Printf("mic: слушаю %s (vqe_tap)", path)
+
+	buf := make([]byte, 8192)
+	for {
+		select {
+		case <-stop:
+			return nil
+		default:
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, _, err := conn.ReadFromUnix(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return fmt.Errorf("mic socket read: %w", err)
+		}
+		if n <= 1 {
+			continue
+		}
+		chunk := make([]byte, n)
+		copy(chunk, buf[:n])
+		pendingHolder.push(chunk)
 	}
 }
 
@@ -352,26 +396,50 @@ func bumpReconnect() {
 
 func main() {
 	flag.Parse()
+	if *serverURL == "" {
+		discoveryMode = true
+	}
 	logf, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		logf = os.Stderr
 	}
 	log.SetOutput(logf)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Printf("=== hermes-station-agent старт: mic=%s server=%s name=%s buffer=%ds",
-		*micAddr, *serverURL, *deviceName, *bufferSec)
+
+	prof, perr := resolvePlatform(*platform)
+	if perr != nil {
+		// Профиль определяет звук (gst или aplay), микрофон (yio или vqe) и
+		// кольцо. Подставить micro «на всякий случай» значит на plum получить
+		// молчащий микрофон и непроигрываемый звук — ошибку, которую никто не
+		// свяжет с платформой. Лучше честно не стартовать.
+		log.Fatalf("платформа: %v — без профиля агент не работает; укажи -platform lite1|lite2", perr)
+	}
+	plat = prof
+	log.Printf("платформа: %s (LED=%s:*, звук=%s, микрофон=%s)",
+		plat.Name, plat.LEDPrefix, plat.AudioMode, plat.MicMode)
+	readMicFn := readMic
+	if plat.MicMode == "vqe" {
+		readMicFn = readMicVQE
+	}
+	addr := *serverURL
+	if addr == "" {
+		addr = "поиск в локальной сети"
+	}
+	log.Printf("=== hermes-station-agent старт: mic=%s server=%s mac=%s buffer=%ds",
+		*micAddr, addr, primaryMAC(), *bufferSec)
 
 	pendingHolder = newPendingBuffer(*bufferSec * 32000)
 	stop := make(chan struct{})
 	go reportLoop()
 	go audioPlayer()
 	go wsLoop()
-	go watchButtonsLog(context.Background())
+	go watchButtons(context.Background())
 	go watchMediaLog(context.Background())
+	go watchVolume(context.Background())
 
 	backoff := backoffMin
 	for {
-		if err := readMic(stop); err != nil {
+		if err := readMicFn(stop); err != nil {
 			log.Printf("mic: %v — переподключение через %v", err, backoff)
 			time.Sleep(backoff)
 			backoff *= 2

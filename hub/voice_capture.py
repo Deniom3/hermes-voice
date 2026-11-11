@@ -17,20 +17,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
-import re
+import shutil
 import time
 import wave
 from dataclasses import dataclass
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 SR = 16000
 FRAME = 320
 TARGET_RMS = 2300.0
 PEAK_MAX = 30000
 
-_WAKE_NAME = re.compile(r"(?i)герм|hermes|germes|girmes|ермес|garmin")
 
 
 def read_model_json() -> str:
@@ -58,6 +60,142 @@ class Ring:
 
     def __len__(self) -> int:
         return len(self._buf)
+
+
+class StreamRing:
+    """Последний час СЫРОГО потока на диске, кусками по chunk_s.
+
+    Окно события живёт в памяти 8 с и исчезает; если человек скажет «в 14:27
+    не сработало», разобрать это нечем. Здесь звук лежит час: файлы
+    `<name>-<epoch_ms>.raw.pcm`, старые удаляются при ротации. Миллисекунды в
+    имени — чтобы два открытия в одну секунду (рестарт, переподключение) не
+    перезаписали друг друга.
+
+    Пишется только сырой поток — им питается детектор, второй (AGC) поток
+    для разбора не нужен. 16 кГц s16le = 115 МБ в час на колонку.
+    """
+
+    BYTES_PER_S = SR * 2
+
+    def __init__(self, root: str, name: str, keep_s: float = 3600.0,
+                 chunk_s: float = 300.0, enabled: bool = True,
+                 min_free_mb: int = 1500):
+        self.root = root
+        self.name = name
+        self.keep_s = keep_s
+        self.chunk_bytes = max(1, int(chunk_s * self.BYTES_PER_S))
+        self.enabled = enabled
+        self.min_free = min_free_mb * 1024 * 1024
+        self._f = None
+        self._written = 0
+        self._last_flush = 0.0
+        self._last_prune = 0.0
+        self._blocked_until = 0.0
+        self._warned = 0.0
+        if self.enabled:
+            try:
+                os.makedirs(self.root, exist_ok=True)
+            except OSError as e:
+                log.warning("кольцо: каталог %s не создан (%s), запись выключена",
+                            self.root, e)
+                self.enabled = False
+            self._prune(time.time())
+
+    def write(self, pcm: bytes) -> None:
+        if not self.enabled or not pcm:
+            return
+        now = time.time()
+        if now < self._blocked_until:
+            return
+        if self._f is None or self._written >= self.chunk_bytes:
+            if not self._open(now):
+                return
+        f = self._f
+        if f is None:
+            return
+        try:
+            f.write(pcm)
+        except OSError as e:
+            log.warning("кольцо: запись не удалась (%s), файл закрыт", e)
+            self._close()
+            return
+        self._written += len(pcm)
+        if now - self._last_flush >= 5.0:
+            try:
+                f.flush()
+            except OSError:
+                pass
+            self._last_flush = now
+        if now - self._last_prune >= 60.0:
+            self._prune(now)
+
+    def close(self) -> None:
+        self._close()
+
+    def _open(self, now: float) -> bool:
+        self._close()
+        try:
+            free = shutil.disk_usage(self.root).free
+        except OSError as e:
+            log.warning("кольцо: место не проверено (%s)", e)
+            free = 0
+        if free < self.min_free:
+            if now - self._warned > 600:
+                log.warning("кольцо: свободно %d МБ, запись приостановлена",
+                            free // 1048576)
+                self._warned = now
+            self._blocked_until = now + 60
+            return False
+        stamp = int(now * 1000)
+        path = os.path.join(self.root, f"{self.name}-{stamp}.raw.pcm")
+        while os.path.exists(path):
+            # два открытия в одну миллисекунду не должны перезаписать файл
+            stamp += 1
+            path = os.path.join(self.root, f"{self.name}-{stamp}.raw.pcm")
+        try:
+            self._f = open(path, "wb")
+        except OSError as e:
+            log.warning("кольцо: файл не открылся (%s)", e)
+            self._blocked_until = now + 60
+            return False
+        self._written = 0
+        self._last_flush = now
+        self._prune(now)
+        return True
+
+    def _close(self) -> None:
+        if self._f is None:
+            return
+        try:
+            self._f.flush()
+            self._f.close()
+        except OSError:
+            pass
+        self._f = None
+
+    def _prune(self, now: float) -> None:
+        self._last_prune = now
+        cutoff = now - self.keep_s
+        prefix = f"{self.name}-"
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            return
+        for fn in names:
+            if not (fn.startswith(prefix) and fn.endswith(".raw.pcm")):
+                continue
+            try:
+                started = int(fn[len(prefix):-len(".raw.pcm")]) / 1000.0
+            except ValueError:
+                continue
+            if started < cutoff or started > now + 300:
+                # Старше срока — обычная ротация. Метка из будущего (> 5 мин) —
+                # след скачка часов: NTP вернул время назад, и такой файл иначе
+                # не удаляется никогда, потому что «моложе» окна хранения.
+                try:
+                    os.unlink(os.path.join(self.root, fn))
+                except OSError:
+                    pass
 
 
 class RetroScanner:
@@ -177,9 +315,16 @@ class MissWatcher:
     вырезать окно из кольца.
 
     Ограничения от шума: не чаще min_gap_s и не больше per_hour в час.
+
+    Полоса 0.65–0.95. Сначала нижняя граница была 0.80, но живой промах 08.11
+    дал пик 0.697: фраза «О'кей, Гермес, включи лампу» распозналась полностью,
+    а детектор дал 0.697 против 0.995 на повторе — разница 7 дБ по уровню.
+    Такой промах не попадал ни в misses, ни в positives, то есть модель не
+    видела именно те случаи, ради которых набор и собирается. Шум отсекает не
+    порог, а проверка текста распознаванием: без имени клип не пишется.
     """
 
-    min_score: float = 0.90
+    min_score: float = 0.65
     high: float = 0.95
     gap_s: float = 1.5
     min_gap_s: float = 4.0

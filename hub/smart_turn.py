@@ -10,17 +10,22 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import numpy as np
 import onnxruntime as ort
 
 from _whisper_features import compute_whisper_log_mel_features
 
+try:                      # запуск как модуль
+    from . import config
+except ImportError:       # запуск как скрипт
+    import config
+
 log = logging.getLogger("smart-turn")
 
-MODEL_PATH = os.environ.get(
-    "SMART_TURN_MODEL", "/srv/kws/models/smart-turn-v3.2-cpu.onnx")
+MODEL_PATH = config.get(
+    "dialog", "smart_turn_model",
+    default="/srv/kws/models/smart-turn-v3.2-cpu.onnx")
 SAMPLE_RATE = 16000
 MAX_SECONDS = 8.0
 
@@ -32,7 +37,7 @@ class SmartTurn:
         # Порог из env: на 0.5 модель слишком охотно объявляла конец на паузе
         # внутри фразы («какая температура… э-э… в комнате»).
         if threshold is None:
-            threshold = float(os.environ.get("SMART_TURN_THRESHOLD", "0.75"))
+            threshold = config.as_float("dialog", "smart_turn_threshold", default=0.75)
         so = ort.SessionOptions()
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         so.inter_op_num_threads = 1

@@ -16,8 +16,14 @@ import wave
 
 import numpy as np
 
+try:                      # запуск как модуль
+    from . import config
+except ImportError:       # запуск как скрипт
+    import config
+
 sys.path.insert(0, '/opt/hermes-voice')
-os.environ.setdefault('KWS_MODEL_JSON', '/srv/kws/models/wakeword_e90e6e54.json')
+os.environ.setdefault('KWS_MODEL_JSON', config.get(
+    "wake", "model", default="/srv/kws/models/wakeword_e90e6e54.json"))
 
 
 class AGC:
@@ -54,9 +60,13 @@ class WakeDetector:
 
     def __init__(self, threshold=0.95, refractory=1.5):
         import wake_gate
-        wake_gate.load()
-        self._model = wake_gate._model
-        self._features = wake_gate._features
+        # Свой экземпляр модели и признаков на каждую колонку. Общая модель
+        # перемешивает мел-состояние двух потоков: замер на живых записях —
+        # одиночный поток 0.996, два потока через один экземпляр 0.046.
+        self._model, self._features = wake_gate.create()
+        if self._model is None or self._features is None:
+            raise RuntimeError("детектор ключевого слова недоступен: %s"
+                               % wake_gate.status().get("reason"))
         self._model.reset()
         self._features.reset()
         self.threshold = threshold
@@ -176,14 +186,17 @@ class PhraseCollector:
         self.voiced = False
         self.seen = 0
 
-    def feed(self, chunk: bytes, analysis: bytes | None = None):
+    def feed(self, chunk: bytes, analysis: bytes | None = None,
+             seed: bool = False):
         """Возвращает готовый PCM, когда фраза закончилась, иначе None.
         Строка 'cancel' — за wait_voice никто не заговорил.
 
-        chunk — поток после AGC (из него собирается фраза для ASR),
-        analysis — сырой поток: по нему решаем «речь или щелчок», потому что
-        AGC раздувает стук клавиатуры до низкочастотного сигнала и признак
-        по нему не работает.
+        chunk — поток с микрофона; в ASR он уходит без предварительного AGC,
+        усиление делает normalize_for_asr уже после ключевого слова.
+        analysis — тот же сырой поток: по нему решаем «речь или щелчок»,
+        потому что громкость колонки очень низкая (пик 100–400).
+        seed — уже подтверждённое детектором аудио (pre-roll активации):
+        кладём его во фразу целиком, не спрашивая VAD.
         """
         x = np.frombuffer(chunk, dtype=np.int16)
         src = np.frombuffer(analysis, dtype=np.int16) if analysis else x
@@ -197,10 +210,25 @@ class PhraseCollector:
             if x.size == 0:
                 return None
 
-        rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+        if seed:
+            # Префикс активации уже подтверждён детектором: кладём его в
+            # фразу целиком, не спрашивая VAD. Иначе тихое «окей, Гермес»
+            # отбрасывается как фон, и ASR получает фразу без начала —
+            # из-за этого терялись первые слова и искажалось обращение.
+            self.buf = np.concatenate([self.buf, x])
+            self.voiced = True
+            self.voice_run += x.size
+            self.silent_run = 0
+            self._src_buf = np.concatenate([self._src_buf, src])[-3200:]
+            self._src_hist.append(
+                float(np.sqrt(np.mean(src.astype(np.float64) ** 2))))
+            if len(self._src_hist) > 200:
+                del self._src_hist[:-200]
+            return None
+
         src_rms = float(np.sqrt(np.mean(src.astype(np.float64) ** 2)))
-        # «голос» = спектр речи, а не громкость: AGC делает стук клавиатуры
-        # громким, но низких частот у него почти нет (проверено по записи).
+        # «голос» = спектр речи, а не громкость: сырой поток колонки очень
+        # тихий, но по форме спектра речь всё равно отличается от щелчка.
         # Признак считаем по окну 0.2 с: на одиночном 32-мс чанке статистики нет.
         self._src_buf = np.concatenate([self._src_buf, src])[-3200:]
         ratio = _speech_ratio(self._src_buf) if self._src_buf.size >= 1600 else 0.0
@@ -217,8 +245,7 @@ class PhraseCollector:
         floor = (float(np.percentile(self._src_hist, 10))
                  if len(self._src_hist) >= 20 else 0.0)
         speech = (src_rms >= max(5.0, floor * 1.7)
-                  and ratio >= 0.08
-                  and rms >= self.min_rms * 0.5)
+                  and ratio >= 0.08)
 
         if not self.voiced:
             # ждём начало фразы
@@ -298,8 +325,9 @@ def pcm_to_wav(pcm: np.ndarray, sr=16000) -> bytes:
     return bio.getvalue()
 
 
-ASR_URL = os.environ.get(
-    "ASR_URL", "http://127.0.0.1:8000/v1/audio/transcriptions")  # единый шлюз (ASR и TTS)
+ASR_URL = config.get(
+    "asr", "url",
+    default=os.environ.get("ASR_URL", "http://127.0.0.1:8000/v1/audio/transcriptions"))
 
 log = logging.getLogger(__name__)
 
@@ -332,7 +360,12 @@ def transcribe(pcm: np.ndarray, url: str | None = None,
     логировался. Ошибка шлюза должна быть видна, а не заглушаться вторым путём.
     """
     target = url or ASR_URL
+    raw_peak = int(np.abs(pcm.astype(np.int32)).max()) if pcm.size else 0
+    raw_rms = float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2))) if pcm.size else 0.0
     pcm = normalize_for_asr(pcm)
+    new_peak = int(np.abs(pcm.astype(np.int32)).max()) if pcm.size else 0
+    log.info("ASR вход: peak %d→%d, rms %.0f, %.1f с",
+             raw_peak, new_peak, raw_rms, len(pcm) / 16000)
     last: Exception | None = None
     for attempt in (1, 2):
         try:

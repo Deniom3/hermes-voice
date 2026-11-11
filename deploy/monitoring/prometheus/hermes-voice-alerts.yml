@@ -1,0 +1,71 @@
+# Правила алертов голосового контура.
+# Положить рядом с prometheus.yml и подключить в rule_files.
+groups:
+  - name: hermes-voice
+    rules:
+      - alert: HermesVoiceHubDown
+        expr: up{job="hermes-voice"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Голосовой хаб не отвечает"
+          description: "Prometheus не может скрейпить {{ $labels.instance }}:8796 больше 2 минут."
+
+      - alert: HermesVoiceStationOffline
+        expr: hermes_voice_station_online == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Колонка {{ $labels.station }} отвалилась от хаба"
+          description: "Нет WebSocket-подключения от {{ $labels.station }} больше 2 минут."
+
+      - alert: HermesVoiceStationSilent
+        expr: hermes_voice_station_online == 1 and (time() - hermes_voice_station_last_audio_timestamp_seconds) > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Колонка {{ $labels.station }} подключена, но молчит"
+          description: "Аудио не приходит больше 2 минут: завис агент колонки или микрофон."
+
+      - alert: HermesVoiceNoNameRate
+        expr: |
+          sum(rate(hermes_voice_wake_no_name_total[30m]))
+            / clamp_min(sum(rate(hermes_voice_wake_activations_total[30m])), 1e-9) > 0.15
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Больше 15% активаций без обращения в тексте"
+          description: "Либо ложные срабатывания, либо ASR перестал распознавать имя."
+
+      - alert: HermesVoiceMissRate
+        expr: |
+          sum(rate(hermes_voice_wake_misses_total[30m]))
+            / clamp_min(sum(rate(hermes_voice_wake_activations_total[30m])), 1e-9) > 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Много промахов детектора (0.80–0.95)"
+          description: "Слово почти ловится: стоит смотреть модель и микрофонный тракт."
+
+      - alert: HermesVoiceAsrErrors
+        expr: increase(hermes_voice_asr_errors_total[10m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ошибки распознавания"
+          description: "Больше 3 ошибок ASR за 10 минут: проверить шлюз 192.168.1.11:8000."
+
+      - alert: HermesVoiceHubErrors
+        expr: sum(rate(hermes_voice_errors_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ошибки стадий ответа"
+          description: "Стадия {{ $labels.stage }}: ответы не доходят до колонки."

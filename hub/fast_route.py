@@ -11,6 +11,7 @@ HomeRoute (команды и показания без LLM), а если мар�
 from __future__ import annotations
 
 import logging
+import contextvars
 import os
 
 try:                      # запуск как модуль
@@ -20,7 +21,21 @@ except ImportError:       # запуск как скрипт
 
 log = logging.getLogger("fast-route")
 
-STATION_DEFAULT = "media_player.yandex_station_lite"
+# Какая колонка сейчас говорит: нужно, чтобы громкость ставилась именно ей.
+STATION = contextvars.ContextVar("station", default=None)
+
+# Чем начат ход: wake / barge / dialog / followup / button. Перебивание — это
+# разговорный ход, и быстрый дом на нём ловит обсуждение и обрывки ASR
+# («а если включить лампу?» — уже команда). Поэтому barge идёт только в агент.
+ORIGIN = contextvars.ContextVar("origin", default=None)
+
+
+def set_station(name: str | None) -> None:
+    STATION.set(name)
+
+
+def set_origin(origin: str | None) -> None:
+    ORIGIN.set(origin)
 _route = None
 _failed = False
 
@@ -49,23 +64,38 @@ def route():
         log.warning("ha_route недоступен: %s", e)
         _failed = True
         return None
+    volume_source = volume_setter = None
+    try:
+        from . import voice_hub
+    except Exception:  # noqa: BLE001
+        try:
+            import voice_hub
+        except Exception:  # noqa: BLE001
+            voice_hub = None
+            log.debug("хаб недоступен — громкость читаем из HA")
+    if voice_hub is not None:
+        volume_source = getattr(voice_hub, "station_volume", None)
+        volume_setter = getattr(voice_hub, "station_set_volume", None)
     _route = ha_route.HomeRoute(
         ha_route.HAClient(url, token),
-        station_entity=os.environ.get("STATION_ENTITY", STATION_DEFAULT),
+        volume_source=volume_source,
+        volume_setter=volume_setter,
     )
     return _route
 
 
 async def stream(text: str, on_event=None):
     """Поток ответа: быстрый маршрут или обычный агент."""
-    fast = route()
+    # Перебивание — продолжение разговора, а не команда: быстрый дом здесь
+    # перехватывает обсуждение и обрывки распознавания. Ведём сразу к агенту.
+    fast = None if ORIGIN.get() == "barge" else route()
     if fast is not None:
         try:
-            answer = await fast.route(text)
+            answer = await fast.route(text, station=STATION.get())
         except Exception as e:  # noqa: BLE001
             log.warning("быстрый маршрут упал: %s", e)
             answer = None
-        if answer:
+        if answer is not None:
             if getattr(fast, "last_kind", None) == "command":
                 # Быстрая команда: действие уже выполнено, но вслух не отчитываемся.
                 log.info("команда выполнена молча: %r", answer)

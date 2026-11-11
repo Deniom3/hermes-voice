@@ -115,6 +115,30 @@ class BuildRulesTest(unittest.TestCase):
         self.assertEqual(m["counts"]["positives"], 0)
         self.assertIn("positives без текста", m["skipped"])
 
+    def test_miss_with_name_goes_to_positives(self):
+        """Промах с обращением — это positive для обучения.
+
+        Дефект: `misses` не входили в `CLASSES`, поэтому фразы, на которых
+        детектор дал 0.83–0.94 и не сработал, в набор не попадали вообще —
+        модель не видела именно тех случаев, которые должна выучить.
+        """
+        write_event(self.collect, "misses", "m1", speech(seed=3),
+                    {"text": "Окей, Герми, сколько времени?", "reason": "near_miss",
+                     "score": 0.887})
+        m = self.build()
+        self.assertEqual(m["counts"], {"positives": 1, "negatives": 0})
+        dst = os.path.join(self.out, "set", "positives", "m1.wav")
+        self.assertTrue(os.path.exists(dst))
+        meta = json.load(open(os.path.join(self.out, "set", "positives", "m1.json")))
+        self.assertEqual(meta.get("source_class"), "misses")
+
+    def test_miss_without_name_is_rejected(self):
+        write_event(self.collect, "misses", "m2", speech(seed=4),
+                    {"text": "Холодно, говорю.", "reason": "near_miss", "score": 0.9})
+        m = self.build()
+        self.assertEqual(m["counts"]["positives"], 0)
+        self.assertIn("misses без обращения в тексте", m["skipped"])
+
     def test_negative_with_foreign_reason_is_rejected(self):
         write_event(self.collect, "negatives", "odd", speech(seed=12),
                     {"text": "что-то", "reason": "verify_fail", "score": 0.99})

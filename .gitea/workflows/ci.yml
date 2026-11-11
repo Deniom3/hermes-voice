@@ -38,6 +38,11 @@ jobs:
           .venv-ci/bin/pip install -r requirements.txt
 
       - name: Тесты
+        # Тесты читают hub/config.example.json как рабочий конфиг: на раннере
+        # нет /etc/hermes-voice/hub.json, а фразы быстрого маршрута живут
+        # только в файле — без него модуль честно отказывается стартовать.
+        env:
+          HUB_CONFIG: ${{ github.workspace }}/hub/config.example.json
         run: .venv-ci/bin/python -m unittest discover -s hub/tests -t .
 
   lint:
@@ -60,3 +65,35 @@ jobs:
 
       - name: vulture — код, на который никто не ссылается
         run: .venv-lint/bin/python -m vulture hub/*.py --min-confidence 80
+
+  go:
+    name: Go (сборка и тесты)
+    runs-on: voice-ci
+    timeout-minutes: 20
+    env:
+      # Раннер не достаёт proxy.golang.org (соединение рвётся), поэтому
+      # зависимости берём из agent/vendor, а не из сети.
+      GOFLAGS: -mod=vendor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Установка Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: agent/go.sum
+
+      - name: vet
+        working-directory: agent
+        run: go vet ./...
+
+      - name: Тесты
+        working-directory: agent
+        run: go test -race ./...
+
+      - name: Сборка armv7 (как на колонке)
+        working-directory: agent
+        run: GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -o /tmp/voice-agent .

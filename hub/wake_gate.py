@@ -23,24 +23,30 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import threading
 import time
 from pathlib import Path
+
+try:                      # запуск как модуль
+    from . import config
+except ImportError:       # запуск как скрипт
+    import config
 
 log = logging.getLogger("wake-gate")
 
 SAMPLE_RATE = 16000
 FRAME_BYTES = 320          # 10 мс, 16 кГц, s16le
 
-_VENV = os.environ.get("KWS_VENV", "/opt/hermes-voice/.venv-wake")
-_MODEL_JSON = os.environ.get("KWS_MODEL_JSON", "/srv/kws/models/wakeword_e90e6e54.json")
-_ENABLED = os.environ.get("KWS_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+_VENV = config.get("wake", "venv", default="/opt/hermes-voice/.venv-wake")
+_MODEL_JSON = config.get("wake", "model", default="/srv/kws/models/wakeword_e90e6e54.json")
+_ENABLED = config.as_bool("wake", "enabled", default=True)
 
 _lock = threading.Lock()
-_model = None                 # MicroWakeWord
+_model = None                 # MicroWakeWord — для офлайн-проверок и статуса
 _features = None              # MicroWakeWordFeatures
+_ModelClass = None            # классы из pymicro_wakeword, для create()
+_FeaturesClass = None
 _loaded = False
 _reason = "не инициализирован"
 
@@ -55,7 +61,7 @@ def _add_venv_to_path() -> None:
 
 def load() -> bool:
     """Загружает модель один раз. Возвращает True, если детектор работоспособен."""
-    global _model, _features, _loaded, _reason
+    global _model, _features, _loaded, _reason, _ModelClass, _FeaturesClass
     with _lock:
         if _loaded:
             return _model is not None
@@ -72,6 +78,8 @@ def load() -> bool:
         try:
             _add_venv_to_path()
             from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures  # noqa: PLC0415
+            _ModelClass = MicroWakeWord
+            _FeaturesClass = MicroWakeWordFeatures
         except Exception as e:  # noqa: BLE001
             _reason = f"нет pymicro_wakeword ({e})"
             log.warning("детектор ключевого слова недоступен: %s", _reason)
@@ -93,6 +101,29 @@ def load() -> bool:
 
 def available() -> bool:
     return _model is not None and _features is not None
+
+
+def create():
+    """Новый независимый экземпляр модели и признаков.
+
+    Нужен каждой колонке отдельно: `MicroWakeWordFeatures` держит состояние
+    потока (мел-буферы, скользящее окно), и два детектора на одном экземпляре
+    перемешивают кадры разных колонок. Замер на живых записях: одиночный поток
+    даёт 0.996, два потока через общую модель — 0.046, то есть слово не
+    ловится ни у одной. Глобальные `_model`/`_features` остаются для офлайн-
+    проверок и статуса.
+
+    Возвращает (None, None), если модель недоступна; вызывающий решает, что
+    делать — молчать или сообщить об ошибке.
+    """
+    load()
+    if _ModelClass is None or _FeaturesClass is None:
+        return None, None
+    try:
+        return _ModelClass.from_config(Path(_MODEL_JSON)), _FeaturesClass()
+    except Exception as e:  # noqa: BLE001
+        log.warning("детектор: не удалось создать экземпляр модели: %s", e)
+        return None, None
 
 
 def status() -> dict:

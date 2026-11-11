@@ -31,18 +31,19 @@ class MissWatcherTest(unittest.TestCase):
         self.assertAlmostEqual(peak, 0.91)
         self.assertLessEqual(peak_at, time.monotonic())
 
-    def test_default_band_starts_at_090(self):
-        """По умолчанию пишем только 0.90–0.95: ниже — уже не «почти сработало»."""
+    def test_default_band_starts_at_065(self):
+        """По умолчанию пишем 0.65–0.95: живой промах 08.11 дал 0.697."""
         m = voice_capture.MissWatcher(gap_s=0.02, min_gap_s=0.0)
-        self.assertIsNone(m.offer(0.85))
+        self.assertIsNone(m.offer(0.60))
         time.sleep(0.05)
         self.assertIsNone(m.offer(0.10))
         m2 = voice_capture.MissWatcher(gap_s=0.02, min_gap_s=0.0)
-        m2.offer(0.93)
+        m2.offer(0.70)
         time.sleep(0.05)
         got = m2.offer(0.10)
         self.assertIsNotNone(got)
-        self.assertAlmostEqual(got[1], 0.93)
+        assert got is not None
+        self.assertAlmostEqual(got[1], 0.70)
 
     def test_activation_resets_episode(self):
         """Пик выше порога — это настоящее срабатывание, промах не пишем."""

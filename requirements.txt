@@ -4,3 +4,4 @@ numpy
 aiohttp
 websockets
 onnxruntime
+paho-mqtt>=2.0

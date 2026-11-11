@@ -5,11 +5,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   tests:
     name: Тесты (unittest)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -22,13 +32,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Тесты
-        run: |
-          set -o pipefail
-          python -m unittest discover -s hub/tests -t . 2>&1 | tee /tmp/tests.log
+        run: python -m unittest discover -s hub/tests -t .
 
   lint:
     name: Линт (мёртвый код)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -44,3 +53,34 @@ jobs:
 
       - name: vulture — код, на который никто не ссылается
         run: python -m vulture hub/*.py --min-confidence 80
+
+  go:
+    name: Агент (сборка и тесты)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      # Зависимости лежат в vendor/: сборка не ходит в сеть и не зависит
+      # от доступности proxy.golang.org в конкретном окружении.
+      GOFLAGS: -mod=vendor
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: agent/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: Сборка под ARMv7 (Яндекс Станция)
+        run: |
+          GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w" -o /tmp/voice-agent .
+          ls -l /tmp/voice-agent

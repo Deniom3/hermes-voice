@@ -13,7 +13,16 @@ import sys
 
 import websockets
 
-URL = 'ws://127.0.0.1:9119/api/ws'
+try:                      # запуск как модуль
+    from . import config
+except ImportError:       # запуск как скрипт
+    import config
+
+# Адрес агента Hermes. Основной источник — hub.json → hermes.url;
+# HERMES_WS_URL остаётся только явным переопределением для отладки.
+_DEFAULT_URL = "ws://127.0.0.1:9119/api/ws"
+URL = os.environ.get("HERMES_WS_URL") or config.get(
+    "hermes", "url", default=_DEFAULT_URL)
 
 LAST_SESSION = {'id': None}
 
@@ -44,8 +53,7 @@ def save_session(sid: str) -> None:
 
 def token() -> str:
     try:
-        with open(os.environ.get('HERMES_DASH_TOKEN_FILE',
-                                  os.path.expanduser('~/.hermes/.dash_token'))) as f:
+        with open(os.environ.get('HERMES_DASH_TOKEN_FILE', '/root/.hermes/.dash_token')) as f:
             return f.read().strip()
     except OSError:
         return ''

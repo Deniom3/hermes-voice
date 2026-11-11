@@ -19,3 +19,4 @@ dumps/
 .coverage
 .venv-ci/
 .venv-lint/
+agent/agent

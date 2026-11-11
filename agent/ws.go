@@ -227,6 +227,12 @@ func (c *wsConn) PingLoop(every time.Duration, stop <-chan struct{}) {
 	}
 }
 
+// SetReadDeadline ограничивает ожидание кадра: без него пропавший сервер
+// оставляет readLoop в вечном ожидании.
+func (c *wsConn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
+}
+
 func (c *wsConn) Close() error {
 	_ = c.WriteMessage(opClose, nil)
 	return c.conn.Close()

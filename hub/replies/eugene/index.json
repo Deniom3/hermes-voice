@@ -1,0 +1,69 @@
+{
+  "voice": "eugene",
+  "phrases": [
+    {
+      "phrase": "Сейчас соображу.",
+      "pool": "think",
+      "file": "2dc237bc4ddeef15.wav",
+      "voice": "eugene",
+      "seconds": 0.97,
+      "bytes": 93644
+    },
+    {
+      "phrase": "Так, собираюсь с мыслями.",
+      "pool": "think",
+      "file": "3c9cf161f82b56ff.wav",
+      "voice": "eugene",
+      "seconds": 1.4,
+      "bytes": 134536
+    },
+    {
+      "phrase": "Давай подумаю секунду.",
+      "pool": "think",
+      "file": "4729155f818c05ec.wav",
+      "voice": "eugene",
+      "seconds": 1.36,
+      "bytes": 130396
+    },
+    {
+      "phrase": "Момент, подумаю.",
+      "pool": "think",
+      "file": "5435df7cdc920881.wav",
+      "voice": "eugene",
+      "seconds": 1.13,
+      "bytes": 108204
+    },
+    {
+      "phrase": "Секунду, думаю.",
+      "pool": "think",
+      "file": "566b1b12ec0ba660.wav",
+      "voice": "eugene",
+      "seconds": 0.98,
+      "bytes": 94068
+    },
+    {
+      "phrase": "Сейчас разберусь и отвечу.",
+      "pool": "think",
+      "file": "8fc44f4a234d0a28.wav",
+      "voice": "eugene",
+      "seconds": 1.55,
+      "bytes": 149030
+    },
+    {
+      "phrase": "Так, есть мысль, секунду.",
+      "pool": "think",
+      "file": "eab8dca15120ee99.wav",
+      "voice": "eugene",
+      "seconds": 1.76,
+      "bytes": 169154
+    },
+    {
+      "phrase": "Минуту, обдумываю.",
+      "pool": "think",
+      "file": "fe05d59cd2682b30.wav",
+      "voice": "eugene",
+      "seconds": 1.22,
+      "bytes": 117398
+    }
+  ]
+}

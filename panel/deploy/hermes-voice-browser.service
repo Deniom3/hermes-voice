@@ -9,7 +9,7 @@ Type=simple
 # пользователь, владеющий VNC-сессией и профилем Chrome
 User=hermes
 Environment=DISPLAY=:1
-Environment=XAUTHORITY=%h/.Xauthority
+Environment=XAUTHORITY=/home/hermes/.Xauthority
 ExecStart=/usr/local/bin/start-hermes-chrome-cdp.sh
 Restart=always
 RestartSec=5

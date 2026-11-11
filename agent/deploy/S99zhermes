@@ -1,24 +1,32 @@
 #!/bin/sh
-# Автозапуск агента Hermes на Яндекс Станции.
-# Ставится в /etc/init.d/S99zhermes; откат — удалить файл и перезагрузить колонку.
+# Запуск агента колонки (Лайт 1).
+# Ни адреса хаба, ни имени здесь нет: хаб находится broadcast-поиском,
+# имя станции берётся по MAC из wake.stations в /etc/hermes-voice/hub.json.
+
 AGENT=/data/opt/hermes-station/voice-agent
 LOG=/tmp/hermes-agent.log
 PIDF=/tmp/zhermes.pid
-# Адрес хаба и имя устройства — в /data/opt/hermes-station/agent.env,
-# чтобы не держать сетевые адреса и имена в репозитории.
-[ -f /data/opt/hermes-station/agent.env ] && . /data/opt/hermes-station/agent.env
-VOICE_HUB_ADDR="${VOICE_HUB_ADDR:-127.0.0.1}"
-VOICE_DEVICE_NAME="${VOICE_DEVICE_NAME:-lite-1}"
-VOICE_THRESHOLD="${VOICE_THRESHOLD:-0.95}"
-SERVER="ws://${VOICE_HUB_ADDR}:8796/ws"
+
+# Ждём обычный IPv4 на Wi-Fi: с link-local 169.254 broadcast уходит в никуда.
+wait_net() {
+    i=0
+    while [ "$i" -lt 60 ]; do
+        if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
 
 start() {
     [ -x "$AGENT" ] || exit 0
     if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
         exit 0
     fi
-    nohup "$AGENT" -server "$SERVER" -name "$VOICE_DEVICE_NAME" \
-        -threshold "$VOICE_THRESHOLD" -v >>"$LOG" 2>&1 &
+    wait_net
+    nohup "$AGENT" -v >>"$LOG" 2>&1 &
     echo $! >"$PIDF"
 }
 

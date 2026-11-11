@@ -1,0 +1,46 @@
+#!/bin/sh
+# Запуск агента колонки (Лайт 2).
+# Ни адреса хаба, ни имени здесь нет: хаб находится broadcast-поиском,
+# имя станции берётся по MAC из wake.stations в /etc/hermes-voice/hub.json.
+
+AGENT=/data/opt/hermes-agent/voice-agent
+LOG=/tmp/hermes-agent.log
+PIDF=/tmp/zhermes.pid
+
+# Ждём обычный IPv4 на Wi-Fi: с link-local 169.254 broadcast уходит в никуда.
+wait_net() {
+    i=0
+    while [ "$i" -lt 60 ]; do
+        if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+start() {
+    [ -x "$AGENT" ] || exit 0
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+        exit 0
+    fi
+    wait_net
+    nohup "$AGENT" -platform auto -mic-socket /data/opt/hermes-agent/mic.sock \
+        -v >>"$LOG" 2>&1 &
+    echo $! >"$PIDF"
+}
+
+stop() {
+    if [ -f "$PIDF" ]; then
+        kill "$(cat "$PIDF")" 2>/dev/null
+        rm -f "$PIDF"
+    fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

@@ -57,8 +57,13 @@ from voice_capture import (  # noqa: E402
 )
 from voice_core import name_like  # noqa: E402
 
-CLASSES = ("positives", "negatives")
-CLASSES_WITH_UNCLEAR = ("positives", "negatives", "unclear")
+CLASSES = ("positives", "negatives", "misses")
+CLASSES_WITH_UNCLEAR = ("positives", "negatives", "misses", "unclear")
+# Куда кладём класс при экспорте. `misses` — это фразы, где обращение
+# прозвучало, но детектор не добрал до порога: для обучения это positives,
+# иначе именно те случаи, из-за которых модель не срабатывает, в набор
+# не попадают. Исходный класс сохраняется в meta как source_class.
+TARGET_CLASS = {"misses": "positives"}
 MIN_SECONDS = 1.2
 MIN_ACTIVE_RMS = 8.0
 MIN_PEAK = 40
@@ -117,11 +122,11 @@ def reject_reason(cls: str, pcm: np.ndarray, meta: dict, min_score: float) -> st
         return "нет активной речи"
 
     text = (meta.get("text") or "").strip()
-    if cls == "positives":
+    if cls in ("positives", "misses"):
         if not text:
-            return "positives без текста"
+            return f"{cls} без текста"
         if not name_like(text):
-            return "positives без обращения в тексте"
+            return f"{cls} без обращения в тексте"
     elif cls == "negatives":
         if meta.get("reason") != "no_name":
             return f"negatives с чужой причиной ({meta.get('reason')})"
@@ -174,10 +179,11 @@ def export(root: str, out_root: str, name: str, min_score: float,
     seen = set()
     skipped: dict[str, int] = {}
     items: list[dict] = []
-    counts: dict[str, int] = {c: 0 for c in classes}
+    counts: dict[str, int] = {TARGET_CLASS.get(c, c): 0 for c in classes}
     target_dir = os.path.join(out_root, name)
 
     for cls in classes:
+        dst_cls = TARGET_CLASS.get(cls, cls)
         for wav in event_files(root, cls):
             meta = load_meta(wav)
             pcm = read_wav(wav)
@@ -211,7 +217,7 @@ def export(root: str, out_root: str, name: str, min_score: float,
                     continue
                 relit = True
 
-            dst_dir = os.path.join(target_dir, cls)
+            dst_dir = os.path.join(target_dir, dst_cls)
             dst = os.path.join(dst_dir, os.path.basename(wav))
             if not dry:
                 os.makedirs(dst_dir, exist_ok=True)
@@ -223,12 +229,17 @@ def export(root: str, out_root: str, name: str, min_score: float,
                         w.writeframes(out_pcm.tobytes())
                 else:
                     shutil.copy2(wav, dst)
+                out_meta = dict(meta)
+                if cls != dst_cls:
+                    # Откуда взят клип: misses → positives. Нужно, чтобы
+                    # можно было отличить добавленные промахи от срабатываний.
+                    out_meta["source_class"] = cls
                 with open(dst[:-4] + ".json", "w", encoding="utf-8") as f:
-                    json.dump(meta, f, ensure_ascii=False, indent=1)
+                    json.dump(out_meta, f, ensure_ascii=False, indent=1)
 
-            counts[cls] += 1
+            counts[dst_cls] += 1
             items.append({
-                "file": f"{cls}/{os.path.basename(wav)}",
+                "file": f"{dst_cls}/{os.path.basename(wav)}",
                 "sec": round(len(out_pcm) / SR, 2),
                 "rms": round(active_rms(out_pcm.astype(np.float32))),
                 "peak": int(np.abs(out_pcm.astype(np.int32)).max()),
