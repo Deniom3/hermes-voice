@@ -32,6 +32,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Тесты
+        # Тесты читают hub/config.example.json как рабочий конфиг: на раннере
+        # нет /etc/hermes-voice/hub.json, а фразы быстрого маршрута живут
+        # только в файле — без него модуль честно отказывается стартовать.
+        env:
+          HUB_CONFIG: ${{ github.workspace }}/hub/config.example.json
         run: python -m unittest discover -s hub/tests -t .
 
   lint:
