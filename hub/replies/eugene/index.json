@@ -50,6 +50,62 @@
       "bytes": 149030
     },
     {
+      "phrase": "Локальная очередь пуста, включаю облачную музыку",
+      "pool": "mode",
+      "file": "99848608c4d5e7bd.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 251308
+    },
+    {
+      "phrase": "Включена локальная музыка",
+      "pool": "mode",
+      "file": "b2bc29109ab80acb.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 136108
+    },
+    {
+      "phrase": "Режим пока неизвестен",
+      "pool": "mode",
+      "file": "b8670c62b7667212.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 131500
+    },
+    {
+      "phrase": "Сейчас облачная музыка",
+      "pool": "mode",
+      "file": "bbffcae73befa564.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 124588
+    },
+    {
+      "phrase": "Сейчас локальная музыка",
+      "pool": "mode",
+      "file": "c22cf3bc0cb1c682.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 124588
+    },
+    {
+      "phrase": "Локальная очередь пуста",
+      "pool": "mode",
+      "file": "d1e87fc98f4af3db.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 126892
+    },
+    {
+      "phrase": "Включена облачная музыка",
+      "pool": "mode",
+      "file": "e1baa8f1f623ca01.wav",
+      "voice": "eugene",
+      "seconds": 44739.24,
+      "bytes": 143020
+    },
+    {
       "phrase": "Так, есть мысль, секунду.",
       "pool": "think",
       "file": "eab8dca15120ee99.wav",

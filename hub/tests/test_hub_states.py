@@ -60,10 +60,23 @@ def make_conn(role="station", follow_up=False, state=State.IDLE):
 
     async def command(cmd, timeout=15):
         conn.commands.append(cmd)
+        if isinstance(cmd, dict) and cmd.get("cmd") == "state":
+            # Факты агента: по умолчанию «не знаю» (None), тест выставляет.
+            return {"ok": True, "native_playing": conn.agent_native,
+                    "sendspin_playing": conn.agent_spin}
         return {"ok": True}
 
     conn.send_json = send_json
     conn.command = command
+    # Объявление режима: в тестах не синтезируем и не пишем на диск.
+    conn.said = []
+
+    async def announce(text):
+        conn.said.append(text)
+        conn.commands.append({"cmd": "say"})
+
+    conn._announce = announce
+    conn._save_mode = lambda mode: None
     conn._save_event = lambda cls, text, reason: conn.saved.append((cls, text, reason))
 
     async def save_settled(cls, text, reason):
@@ -76,6 +89,9 @@ def make_conn(role="station", follow_up=False, state=State.IDLE):
     conn._prev_native = False
     conn._prev_spin = False
     conn._button_guard_until = 0.0
+    # Что агент отвечает на `state`: None — «не знает», тест выставляет факт.
+    conn.agent_native = None
+    conn.agent_spin = False
     return conn
 
 
@@ -558,6 +574,170 @@ class ButtonPauseGuardTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(conn._suppress_resume)
         self.assertIn({"cmd": "native_pause"}, conn.commands)
+        self.assertIn({"cmd": "led", "name": "hermes_pause", "timeout": 1},
+                      conn.commands)
+
+    async def test_button_takes_native_fact_from_agent(self):
+        """Снимок хаба отстал (alice=paused), а агент слышит игру — пауза.
+
+        Регрессия 11.11: локальная пауза в агенте опережала решение хаба,
+        хаб видел «тишину» и первым нажатием включал музыку. Теперь факт
+        берётся у агента, и «тишина» из старого снимка не включает источник.
+        """
+        conn = make_conn()
+        conn.role = "station"
+        conn.turn = None
+        conn._suppress_resume = False
+        conn._resume_task = None
+        conn._sources.alice = voice_hub.sources.PAUSED
+        conn._sources.ma = voice_hub.sources.PAUSED
+        conn._sources.owner = voice_hub.sources.ALICE
+        conn.agent_native = True
+
+        async def core_interrupt():
+            return None
+
+        async def paused(_station):
+            return "paused"
+
+        async def filled(_station):
+            return 1
+
+        async def paused_ok(_station):
+            return True
+
+        conn.core.interrupt = core_interrupt
+        old_s = voice_hub.ma_control.player_state
+        old_q = voice_hub.ma_control.queue_len
+        old_p = voice_hub.ma_control.pause_if_playing
+        voice_hub.ma_control.player_state = paused
+        voice_hub.ma_control.queue_len = filled
+        voice_hub.ma_control.pause_if_playing = paused_ok
+        try:
+            await conn.interrupt(long=False)
+        finally:
+            voice_hub.ma_control.player_state = old_s
+            voice_hub.ma_control.queue_len = old_q
+            voice_hub.ma_control.pause_if_playing = old_p
+
+        self.assertIn({"cmd": "native_pause"}, conn.commands)
+        self.assertNotIn({"cmd": "native_play"}, conn.commands)
+        self.assertTrue(conn._suppress_resume)
+
+
+class SnapshotStreamFactTest(unittest.IsolatedAsyncioTestCase):
+    """«MA играет» и «звук слышен» — разные факты: aplay может быть мёртв."""
+
+    async def _snapshot(self, conn, spin):
+        async def playing(_station):
+            return "playing"
+
+        async def filled(_station):
+            return 1
+
+        conn.agent_spin = spin
+        old_s = voice_hub.ma_control.player_state
+        old_q = voice_hub.ma_control.queue_len
+        voice_hub.ma_control.player_state = playing
+        voice_hub.ma_control.queue_len = filled
+        try:
+            await conn._sync_sources_snapshot()
+        finally:
+            voice_hub.ma_control.player_state = old_s
+            voice_hub.ma_control.queue_len = old_q
+
+    async def test_ma_playing_but_stream_dead_is_not_streaming(self):
+        conn = make_conn()
+        conn._sources.ma = voice_hub.sources.PAUSED
+        conn._sources.agent = voice_hub.sources.STREAMING
+        await self._snapshot(conn, spin=False)
+        self.assertEqual(conn._sources.ma, voice_hub.sources.PLAYING)
+        self.assertEqual(conn._sources.agent, voice_hub.sources.PAUSED)
+
+    async def test_ma_playing_and_stream_alive_is_streaming(self):
+        conn = make_conn()
+        conn._sources.ma = voice_hub.sources.PAUSED
+        conn._sources.agent = voice_hub.sources.PAUSED
+        await self._snapshot(conn, spin=True)
+        self.assertEqual(conn._sources.agent, voice_hub.sources.STREAMING)
+
+
+class ModeAnnounceTest(unittest.IsolatedAsyncioTestCase):
+    async def _press(self, conn, ma_state="playing", queue=1):
+        async def core_interrupt():
+            return None
+
+        async def ma(_station):
+            return ma_state
+
+        async def qlen(_station):
+            return queue
+
+        async def ok(_station):
+            return True
+
+        conn.core.interrupt = core_interrupt
+        olds = (voice_hub.ma_control.player_state,
+                voice_hub.ma_control.queue_len,
+                voice_hub.ma_control.pause_if_playing,
+                voice_hub.ma_control.resume_if_paused,
+                voice_hub.ma_control.play_forced)
+        voice_hub.ma_control.player_state = ma
+        voice_hub.ma_control.queue_len = qlen
+        voice_hub.ma_control.pause_if_playing = ok
+        voice_hub.ma_control.resume_if_paused = ok
+        voice_hub.ma_control.play_forced = ok
+        try:
+            await conn.interrupt(long=True)
+        finally:
+            (voice_hub.ma_control.player_state,
+             voice_hub.ma_control.queue_len,
+             voice_hub.ma_control.pause_if_playing,
+             voice_hub.ma_control.resume_if_paused,
+             voice_hub.ma_control.play_forced) = olds
+
+    async def test_long_press_announces_local_before_play(self):
+        """Фраза о режиме — до включения музыки, а не поверх неё."""
+        conn = make_conn()
+        conn.role = "station"
+        conn.turn = None
+        conn._suppress_resume = False
+        conn._resume_task = None
+        conn._sources.alice = voice_hub.sources.PLAYING
+        conn._sources.ma = voice_hub.sources.PAUSED
+        conn._sources.owner = voice_hub.sources.ALICE
+        conn._sources.ma_queue = "filled"
+
+        await self._press(conn)
+
+        self.assertEqual(conn.said, ["Включена локальная музыка"])
+        cmds = [c.get("cmd") for c in conn.commands if isinstance(c, dict)]
+        self.assertLess(cmds.index("native_pause"), cmds.index("say"))
+        self.assertLess(cmds.index("say"), cmds.index("play"))
+        # Кольцо показывает целевой режим до фразы и гаснет после неё.
+        self.assertIn({"cmd": "led", "name": "hermes_mode_local"},
+                      conn.commands)
+        self.assertLess(cmds.index("led"), cmds.index("say"))
+        self.assertEqual(conn.mode, "local")
+
+    async def test_long_press_empty_queue_announces_cloud(self):
+        """Пустая локальная очередь — уходим в облако и говорим об этом."""
+        conn = make_conn()
+        conn.role = "station"
+        conn.turn = None
+        conn._suppress_resume = False
+        conn._resume_task = None
+        conn._sources.alice = voice_hub.sources.PAUSED
+        conn._sources.ma = voice_hub.sources.IDLE
+        conn._sources.owner = voice_hub.sources.ALICE
+        conn._sources.ma_queue = "empty"
+
+        await self._press(conn, ma_state="idle", queue=0)
+
+        self.assertEqual(conn.said,
+                         ["Локальная очередь пуста, включаю облачную музыку"])
+        self.assertIn({"cmd": "native_play"}, conn.commands)
+        self.assertEqual(conn.mode, "cloud")
 
 
 class ActivationTakesOverButtonPauseTest(unittest.IsolatedAsyncioTestCase):
@@ -978,6 +1158,58 @@ class MaPendingTest(unittest.IsolatedAsyncioTestCase):
             voice_hub.ma_control.queue_len = old_q
 
         self.assertIsNone(conn._ma_pending)
+
+
+class WavSecondsTest(unittest.TestCase):
+    def test_streaming_header_is_counted_by_body(self):
+        """nframes=0x7FFFFFFF не должен давать 44739 с: иначе ждём вечность."""
+        import replies
+        data = replies.audio("Включена локальная музыка")
+        self.assertIsNotNone(data)
+        sec = voice_hub.wav_seconds(data)
+        self.assertGreater(sec, 0.5)
+        self.assertLess(sec, 5.0)
+
+
+class AnnounceWaitTest(unittest.IsolatedAsyncioTestCase):
+    async def test_announce_ends_on_play_done(self):
+        """Конец объявления — по подтверждению колонки, а не по таймауту."""
+        import io
+        import wave
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(48000)
+            w.writeframes(b"\x00\x00" * 9600)      # 0.2 с
+        data = buf.getvalue()
+
+        conn = make_conn()
+        sent = []
+
+        async def command(payload, timeout=10):
+            sent.append(payload)
+            return {"ok": True}
+
+        async def send_binary(_data):
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.05,
+                            lambda: asyncio.ensure_future(conn.on_play_done()))
+
+        old_audio = voice_hub.replies.audio
+        voice_hub.replies.audio = lambda _text: data
+        conn.command = command
+        conn.send_binary = send_binary
+        try:
+            started = time.monotonic()
+            await asyncio.wait_for(
+                voice_hub.Conn._announce(conn, "Включена локальная музыка"),
+                timeout=3.0)
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            voice_hub.replies.audio = old_audio
+        self.assertEqual(sent[0]["cmd"], "say")
 
 
 if __name__ == "__main__":

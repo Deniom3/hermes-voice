@@ -116,3 +116,25 @@ func TestWaitReadableReady(t *testing.T) {
 		t.Fatal("pipe с данными должен быть готов")
 	}
 }
+
+func TestVolumeDelta(t *testing.T) {
+	cases := []struct {
+		code  uint16
+		value int32
+		want  int
+	}{
+		{keyVolumeUp, 1, 1},
+		{keyVolumeDown, 1, -1},
+		{keyVolumeUp, 2, 1},
+		{keyVolumeDown, 2, -1},
+		{keyVolumeUp, 0, 0},
+		{keyVolumeDown, 0, 0},
+		{keyAlice, 1, 0},
+	}
+	for _, c := range cases {
+		if got := volumeDelta(c.code, c.value); got != c.want {
+			t.Fatalf("volumeDelta(%d, %d) = %d, ожидалось %d",
+				c.code, c.value, got, c.want)
+		}
+	}
+}

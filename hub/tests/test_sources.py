@@ -158,6 +158,14 @@ class SwitchAliceTest(unittest.TestCase):
         self.assertEqual(d.actions, [])
         self.assertEqual(d.sources.alice, S.PLAYING)
 
+    def test_long_press_empty_queue_switches_to_cloud(self):
+        """Продолжать локальную очередь нечем — уходим в облако, не в тишину."""
+        d = S.decide(src(alice=S.PAUSED, owner=S.ALICE,
+                         ma_queue="empty"), "switch_source")
+        self.assertEqual(d.actions, [S.PLAY_ALICE])
+        self.assertEqual(d.sources.owner, S.ALICE)
+        self.assertEqual(d.sources.alice, S.PLAYING)
+
     def test_long_press_from_paused_alice_goes_to_ma(self):
         d = S.decide(src(alice=S.PAUSED, owner=S.ALICE,
                          ma_queue="filled"), "switch_source")

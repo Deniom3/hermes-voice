@@ -184,7 +184,14 @@ def decide(src: Sources, event: str) -> Decision:
         to_ma = s.alice == PLAYING or (s.owner == ALICE and s.alice == PAUSED)
         if to_ma:
             if s.ma_queue == "empty":
-                # Продолжать нечего: не глушим Алису зря.
+                # Локальную очередь продолжать нечем. Оставлять нажатие без
+                # ответа нельзя: пользователь ждёт звук. Уходим в облако —
+                # решение Дениса от 11.11.
+                if s.alice == PLAYING:
+                    return _finish(acts, s)
+                acts.append(PLAY_ALICE)
+                s.alice = PLAYING
+                s.owner, s.pause_reason = ALICE, "none"
                 return _finish(acts, s)
             if s.alice == PLAYING:
                 acts.append(PAUSE_ALICE)

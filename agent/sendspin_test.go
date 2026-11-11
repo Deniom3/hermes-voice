@@ -111,3 +111,17 @@ func TestIdentityPersists(t *testing.T) {
 		t.Fatalf("права identity.key = %o, ожидалось 600", st.Mode().Perm())
 	}
 }
+
+// Под TTS поток глушится duck=0, но не останавливается: громкость и mute
+// считаются отдельно, иначе после ответа вернулся бы не тот уровень.
+func TestSSGainDuckSilencesStream(t *testing.T) {
+	if g := ssGain(100, false, 0); g != 0 {
+		t.Fatalf("duck=0 дал усиление %v, ожидался 0", g)
+	}
+	if g := ssGain(100, false, 1); g != 1 {
+		t.Fatalf("duck=1 дал усиление %v, ожидалась 1", g)
+	}
+	if g := ssGain(100, true, 1); g != 0 {
+		t.Fatalf("mute дал усиление %v, ожидался 0", g)
+	}
+}

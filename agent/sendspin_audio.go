@@ -25,14 +25,17 @@ type ssAudio struct {
 	output string
 	volume int
 	muted  bool
-	// paused — пауза под ответ. Write обязан её уважать: иначе поток
-	// чанков от MA перезапускает aplay после остановки, и музыка звучит
-	// поверх ответа.
+	// duck — множитель поверх volume на время TTS: 0 делает поток
+	// беззвучным, но не останавливает aplay. Так MA продолжает гнать
+	// поток, позиция не уезжает, и после ответа не слышно рывка.
+	duck float64
+	// paused — полная пауза (кнопка/остановка): Write не пишет, aplay
+	// остановлен. Для ответа используется duck, не paused.
 	paused bool
 }
 
 func newSSAudio(output string) *ssAudio {
-	return &ssAudio{output: output, volume: 100}
+	return &ssAudio{output: output, volume: 100, duck: 1}
 }
 
 func (a *ssAudio) Start() error {
@@ -115,6 +118,21 @@ func (a *ssAudio) SetVolume(v int, muted bool) {
 	a.mu.Unlock()
 }
 
+// SetDuck — беззвучный, но живой поток на время TTS. 0 = тишина,
+// 1 = обычная громкость. В отличие от SetPaused, aplay продолжает
+// читать и писать, поэтому MA не уходит вперёд и буфер не рвётся.
+func (a *ssAudio) SetDuck(g float64) {
+	if g < 0 {
+		g = 0
+	}
+	if g > 1 {
+		g = 1
+	}
+	a.mu.Lock()
+	a.duck = g
+	a.mu.Unlock()
+}
+
 // Write масштабирует S16_LE и отдаёт aplay. Копия нужна, потому что буфер
 // приходит из расшифрованного сообщения и может использоваться дальше.
 //
@@ -131,10 +149,7 @@ func (a *ssAudio) Write(pcm []byte) {
 		a.mu.Unlock()
 		return
 	}
-	gain := math.Pow(float64(a.volume)/100, 1.5)
-	if a.muted {
-		gain = 0
-	}
+	gain := ssGain(a.volume, a.muted, a.duck)
 	a.mu.Unlock()
 
 	buf := scaleS16(pcm, gain)
@@ -166,12 +181,27 @@ func (a *ssAudio) Write(pcm []byte) {
 	}
 }
 
+// ssGain — итоговый множитель PCM: громкость MA, mute и duck под TTS.
+func ssGain(volume int, muted bool, duck float64) float64 {
+	if muted {
+		return 0
+	}
+	return math.Pow(float64(volume)/100, 1.5) * duck
+}
+
 // scaleS16 возвращает копию PCM с усилением gain (0..1). Нечётный хвостовой
 // байт отбрасывается: кадр S16_LE — два байта.
 func scaleS16(pcm []byte, gain float64) []byte {
 	buf := make([]byte, len(pcm)&^1)
 	copy(buf, pcm)
 	if gain == 1 {
+		return buf
+	}
+	if gain == 0 {
+		// Тишина под TTS: не крутим цикл по каждому сэмплу.
+		for i := range buf {
+			buf[i] = 0
+		}
 		return buf
 	}
 	for i := 0; i+1 < len(buf); i += 2 {

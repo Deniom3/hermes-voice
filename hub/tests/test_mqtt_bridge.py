@@ -393,10 +393,11 @@ class DiscoveryTest(unittest.TestCase):
         self.payloads = {t: json.loads(p) for t, p, _ in self.bridge._client.published}
 
     def test_notify_switch_and_volume_are_published(self):
-        """Четыре сущности на станцию: озвучка, музыка, сенсор и число громкости."""
+        """Пять сущностей на станцию: озвучка, музыка, режим и две громкости."""
         self.assertEqual(set(self.payloads), {
             "homeassistant/notify/hermes_lite_1/config",
             "homeassistant/switch/hermes_lite_1_music/config",
+            "homeassistant/sensor/hermes_lite_1_mode/config",
             "homeassistant/sensor/hermes_lite_1_volume/config",
             "homeassistant/number/hermes_lite_1_volume/config",
         })
@@ -427,6 +428,14 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(cfg["command_topic"], "hermes/stations/lite-1/music/set")
         self.assertEqual((cfg["payload_on"], cfg["payload_off"]), ("play", "pause"))
         self.assertEqual(cfg["json_attributes_topic"], "hermes/stations/lite-1/music")
+
+    def test_mode_sensor_is_enum_with_station_topic(self):
+        cfg = self.payloads["homeassistant/sensor/hermes_lite_1_mode/config"]
+        self.assertEqual(cfg["default_entity_id"], "sensor.hermes_lite_1_mode")
+        self.assertEqual(cfg["state_topic"], "hermes/stations/lite-1/mode")
+        self.assertEqual(cfg["value_template"], "{{ value_json.mode }}")
+        self.assertEqual(cfg["device_class"], "enum")
+        self.assertEqual(cfg["options"], ["local", "cloud", "none"])
 
 
 class ConnectTest(unittest.TestCase):
@@ -565,6 +574,22 @@ class VolumePublishTest(unittest.IsolatedAsyncioTestCase):
         vol = [(t, p) for t, p, _ in bridge._client.published if t.endswith("/volume")]
         self.assertEqual(len(vol), 1)
         self.assertEqual(json.loads(vol[0][1])["level"], 4)
+
+
+class ModePublishTest(unittest.IsolatedAsyncioTestCase):
+    """Режим публикуется retained и только на изменение."""
+
+    async def test_poll_publishes_mode_once(self):
+        conn = FakeConn()
+        conn.mode = "local"
+        bridge = make_bridge(conn)
+        bridge._sync_stations()
+        st = bridge._stations["lite-1"]
+        await bridge._poll_station(st)
+        await bridge._poll_station(st)
+        modes = [(t, p) for t, p, _ in bridge._client.published if t.endswith("/mode")]
+        self.assertEqual(len(modes), 1)
+        self.assertEqual(json.loads(modes[0][1])["mode"], "local")
 
 
 if __name__ == "__main__":

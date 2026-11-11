@@ -266,6 +266,14 @@ var ledStaticColors = map[string][3][3]int{
 	"hermes_tool": {{0x37, 0x6a, 0x05}, {0x42, 0x7d, 0x07}, {0x07, 0x0d, 0x00}},
 	// error: 490000 / 3b0000 / 3b0000 — красный
 	"hermes_error": {{0x49, 0x00, 0x00}, {0x3b, 0x00, 0x00}, {0x3b, 0x00, 0x00}},
+	// pause: e800f3 — штатная вспышка Алисы (player_pause.led): яркий
+	// розово-фиолетовый и плавное затухание. На plum анимаций нет, поэтому
+	// статический цвет того же оттенка, гаснет по таймауту команды.
+	"hermes_pause": {{0xe8, 0x00, 0xf3}, {0xe8, 0x00, 0xf3}, {0xe8, 0x00, 0xf3}},
+	// Режим на время объявления: local — зелёный, cloud — фиолетовый Алисы.
+	// Гаснет по команде хаба после фразы.
+	"hermes_mode_local": {{0x37, 0xd6, 0x7a}, {0x37, 0xd6, 0x7a}, {0x37, 0xd6, 0x7a}},
+	"hermes_mode_cloud": {{0xe8, 0x00, 0xf3}, {0xe8, 0x00, 0xf3}, {0xe8, 0x00, 0xf3}},
 }
 
 // setStaticLED — индикация для plum: снять led_ring_fb, выставить цвет,
@@ -614,24 +622,12 @@ func pressPauseButton(long bool) {
 		}
 		return
 	}
-	// Кнопка должна останавливать и ответ агента, и музыку. killPlayer гасит
-	// только наш aplay/TTS; нативный mediad (Алиса/радио) живёт отдельно.
-	// playerPause отправляем только если нативный плеер действительно играет:
-	// при простое вызов метода 1 на Лайт 1 включает последний источник
-	// (радио Алисы), и кнопка начинает «циклически» запускать музыку.
-	if playing, _ := mediaState(); playing {
-		go func() {
-			if err := playerCommand(playerPause); err != nil {
-				log.Printf("кнопка паузы: музыка не поставлена на паузу: %v", err)
-			}
-		}()
-	} else {
-		log.Printf("кнопка паузы: нативный плеер не играет — не трогаю")
-	}
-	// Sendspin-плеер паузится отдельно: MA не видит нативный mediad.
-	if sendspinEngaged() {
-		sendspinPause()
-	}
+	// Короткое нажатие при живом хабе — только сигнал. Паузу ставит хаб,
+	// когда снимет факты: если паузить здесь, хаб через полсекунды увидит
+	// уже тишину, решит «играть нечему» и включит источник обратно —
+	// ровно «пауза со второго нажатия». Натив и Sendspin — зона хаба.
+	// killPlayer гасит только наш aplay/TTS: это не музыка, хаб о нём
+	// всё равно не знает и буфер доиграет поверх ответа.
 	go notifyHubInterrupt(false)
 	go killPlayer()
 	select {
@@ -645,7 +641,7 @@ func pressPauseButton(long bool) {
 // нажатия), лог — только факт нажатия.
 func watchButtons(ctx context.Context) {
 	for {
-		err := watchAliceKey(ctx, pressPauseButton)
+		err := watchAliceKey(ctx, pressPauseButton, changeVolume)
 		if ctx.Err() != nil {
 			return
 		}

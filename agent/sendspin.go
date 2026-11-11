@@ -6,10 +6,10 @@ package main
 // Роль только player@v1, формат только PCM 48/16/2 — поэтому нет ни FLAC,
 // ни Opus, ни декодера: MA отдаёт готовый PCM, агент пишет его в aplay.
 //
-// Арбитраж с голосом: на время TTS/ответа sendspinPause() останавливает
-// aplay и отправляет client/state с available:true (пауза локальная, чтобы
-// MA не выбрасывал колонку из группы); после ответа sendspinResume()
-// возвращает поток. Это единственное место, где музыка уступает голосу.
+// Арбитраж с голосом: на время TTS/ответа sendspinMuteStream() глушит
+// PCM (duck=0), но aplay продолжает работать. Раньше поток ставился на
+// паузу, и после ответа MA уезжал вперёд: слышался рывок и терялись
+// куски. Полная пауза (sendspinPause) остаётся для кнопки и остановки.
 
 import (
 	"encoding/binary"
@@ -127,7 +127,7 @@ func runSendspinLoop(cfg ssConfig) {
 			available: true,
 			audio:     newSSAudio(cfg.Output),
 			filter:    newSSTimeFilter(),
-			audioCh:   make(chan ssChunk, 32),
+			audioCh:   make(chan ssChunk, 96),
 			timeCh:    make(chan ssServerTime, 8),
 			done:      make(chan struct{}),
 		}
@@ -482,6 +482,17 @@ func (c *ssClient) audioPump() {
 			if paused || !active || ch.gen != gen {
 				continue
 			}
+			// Поток мог начаться заново без server/activate (MA продолжил
+			// после нашей паузы), и тогда aplay не запущен: куски уходят
+			// в никуда, очередь переполняется. Поднимаем его здесь же, но
+			// расписание playAt не ломаем: иначе музыка стартует раньше
+			// времени MA и слышен скачок на 1-2 с.
+			if !c.audio.Running() {
+				if err := c.audio.Start(); err != nil {
+					log.Printf("sendspin: aplay: %v", err)
+					continue
+				}
+			}
 			if ch.playAt > 0 {
 				delay := time.Duration(ch.playAt-ssNowUs())*time.Microsecond - 50*time.Millisecond
 				if delay > 0 {
@@ -636,15 +647,14 @@ func (c *ssClient) pause() {
 
 func (c *ssClient) resume() {
 	c.mu.Lock()
-	if !c.localPaused {
-		c.mu.Unlock()
-		return
-	}
+	wasPaused := c.localPaused
 	active := c.active
 	c.localPaused = false
 	c.mu.Unlock()
 	c.audio.SetPaused(false)
-	if active {
+	// Start нужен и тогда, когда флаг паузы уже снят, но aplay не работает:
+	// иначе поток идёт в пустоту, а очередь переполняется.
+	if active && (wasPaused || !c.audio.Running()) {
 		if err := c.audio.Start(); err != nil {
 			log.Printf("sendspin: aplay: %v", err)
 		}
@@ -671,6 +681,38 @@ func sendspinPause() {
 	ssGlobalMu.Unlock()
 	if c != nil {
 		c.pause()
+	}
+}
+
+// sendspinVolumeFromStation — громкость изменили кнопкой или Алисой:
+// сообщаем MA, чтобы его ползунок не расходился с колонкой.
+func sendspinVolumeFromStation(percent int) {
+	ssGlobalMu.Lock()
+	c := ssGlobal
+	ssGlobalMu.Unlock()
+	if c != nil {
+		c.setVolumeFromStation(percent)
+	}
+}
+
+// sendspinMuteStream/Unmute — тишина на время TTS без остановки потока.
+// aplay продолжает писать нули, MA не уезжает вперёд, и после ответа
+// музыка возвращается без рывка и перезапуска aplay.
+func sendspinMuteStream() {
+	ssGlobalMu.Lock()
+	c := ssGlobal
+	ssGlobalMu.Unlock()
+	if c != nil {
+		c.audio.SetDuck(0)
+	}
+}
+
+func sendspinUnmuteStream() {
+	ssGlobalMu.Lock()
+	c := ssGlobal
+	ssGlobalMu.Unlock()
+	if c != nil {
+		c.audio.SetDuck(1)
 	}
 }
 
@@ -722,7 +764,7 @@ func sendspinOverlayBegin() {
 	if !first {
 		return
 	}
-	sendspinPause()
+	sendspinMuteStream()
 	if playing, _ := mediaState(); playing {
 		if err := playerCommand(playerPause); err == nil {
 			ssOverlayMu.Lock()
@@ -747,7 +789,7 @@ func sendspinOverlayEnd() {
 	if !last {
 		return
 	}
-	sendspinResume()
+	sendspinUnmuteStream()
 	if resumeNative {
 		_ = playerCommand(playerPlay)
 	}

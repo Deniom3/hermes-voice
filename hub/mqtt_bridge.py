@@ -103,6 +103,8 @@ class Station:
     last_state: tuple[str, str] | None = None
     volume: int | None = None
     volume_db: float | None = None
+    # Последний опубликованный режим музыки: local / cloud / none.
+    mode: str | None = None
     # Публикации, которые не удалось отправить (брокер ещё не подключён или
     # publish вернул ошибку). Добираются в следующем круге опроса: иначе
     # retained offline остаётся в брокере, и HA считает колонку недоступной,
@@ -260,6 +262,19 @@ class MqttBridge:
             "icon": "mdi:music", **common,
         }, ensure_ascii=False), retain=True)
 
+        # Режим музыки: local — своя библиотека (MA), cloud — Яндекс Музыка
+        # через Алису. Сенсор нужен автоматизации «какой режим работы» и
+        # дашборду; значение — производное от фактического владельца.
+        c.publish(f"{DISCOVERY_PREFIX}/sensor/hermes_{st.slug}_mode/config", json.dumps({
+            "name": "Режим музыки", "unique_id": f"hermes_{st.slug}_mode",
+            "default_entity_id": f"sensor.hermes_{st.slug}_mode",
+            "state_topic": f"{base}/mode",
+            "value_template": "{{ value_json.mode }}",
+            "device_class": "enum",
+            "options": ["local", "cloud", "none"],
+            "icon": "mdi:music-box-multiple", **common,
+        }, ensure_ascii=False), retain=True)
+
         # Громкость: ALSA-микшер колонки, читается агентом без облака.
         # Сенсор — наблюдение, number — управление; оба смотрят один retained-топик.
         c.publish(f"{DISCOVERY_PREFIX}/sensor/hermes_{st.slug}_volume/config", json.dumps({
@@ -338,6 +353,12 @@ class MqttBridge:
                           retain=True)
             log.info("MQTT: %s громкость %d%%", st.name, st.volume)
 
+        # Режим — производное от фактического владельца в хабе. Публикуем
+        # retained, чтобы HA видел его сразу после старта, а не после нажатия.
+        mode = getattr(st.conn, "mode", "none") or "none"
+        if mode != st.mode:
+            self.publish_mode(st.name, mode)
+
     async def _state_loop(self) -> None:
         while True:
             try:
@@ -354,6 +375,27 @@ class MqttBridge:
     def _publish(self, topic: str, payload: str, retain: bool = False) -> None:
         if self._client:
             self._client.publish(topic, payload, qos=1, retain=retain)
+
+    def publish_mode(self, station: str, mode: str) -> bool:
+        """Опубликовать режим музыки станции (retained).
+
+        Retained, потому что это состояние, а не событие: HA и дашборд
+        должны видеть режим сразу после перезапуска, не дожидаясь нажатия.
+        """
+        if mode not in ("local", "cloud", "none"):
+            return False
+        st = self._stations.get(station)
+        if st is None:
+            for candidate in self._sync_stations():
+                if candidate.name == station:
+                    st = candidate
+                    break
+        if st is None:
+            log.debug("MQTT: режим для неизвестной станции %s — пропущен", station)
+            return False
+        st.mode = mode
+        self._publish(f"{st.base}/mode", json.dumps({"mode": mode}), retain=True)
+        return True
 
     def publish_phrase(self, station: str, text: str) -> bool:
         """Опубликовать распознанную фразу колонки — уже без обращения.

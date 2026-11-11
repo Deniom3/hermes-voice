@@ -39,11 +39,11 @@ var volumeApplyWait = 2 * time.Second
 
 var (
 	volMu      sync.Mutex
-	volRaw     = -1                // последнее прочитанное raw-значение микшера
-	volPercent = -1                // процент ALSA (диагностика)
-	volDB      float64             // dB по ALSA
+	volRaw     = -1                        // последнее прочитанное raw-значение микшера
+	volPercent = -1                        // процент ALSA (диагностика)
+	volDB      float64                     // dB по ALSA
 	volumeNote = make(chan volumeEvent, 1) // сигнал сессии: уровень изменился
-	maVolumeAt time.Time           // когда громкость пришла из MA (не echo)
+	maVolumeAt time.Time                   // когда громкость пришла из MA (не echo)
 )
 
 type volumeEvent struct {
@@ -215,14 +215,91 @@ func setVolumeLevel(level int) error {
 	return setVolumePercent(level*10, false)
 }
 
+// changeVolume — кнопки громкости на колонке. EVIOCGRAB забирает sar0_pad0
+// целиком, поэтому maind эти нажатия не видит и громкость не меняет.
+// Шаг — ровно один уровень станции из десяти (0..10), как у Алисы.
+//
+// Здесь быстрый путь: НЕ ждём подтверждения от maind. Директива применяется
+// до 2 с, и ожидание в setVolumePercent делало кнопку «пролагивающей».
+// Уровень ведём оптимистично от последней команды, раз в 3 с сверяемся
+// с микшером, на всякий случай.
+var (
+	volumeKeyMu    sync.Mutex
+	volumeKeyAt    time.Time
+	volumeKeyLevel = -1
+	// После нажатия кнопки MA успевает прислать своё прежнее значение
+	// (его состояние ещё старое) и откатывает шаг. В течение guard-окна
+	// команды громкости из MA игнорируем — кнопка важнее.
+	volumeKeyGuard time.Time
+)
+
+func changeVolume(delta int) {
+	volumeKeyMu.Lock()
+	now := time.Now()
+	if !volumeKeyAt.IsZero() && now.Sub(volumeKeyAt) < 100*time.Millisecond {
+		volumeKeyMu.Unlock()
+		return
+	}
+	stale := volumeKeyAt.IsZero() || now.Sub(volumeKeyAt) > 3*time.Second
+	volumeKeyAt = now
+	volumeKeyGuard = now.Add(1500 * time.Millisecond)
+	lvl := volumeKeyLevel
+	volumeKeyMu.Unlock()
+
+	if lvl < 0 || stale {
+		if _, pct, db, err := readVolume(); err == nil {
+			lvl = levelOf(pct, db)
+		} else if lvl < 0 {
+			log.Printf("громкость: кнопка: микшер не прочитался: %v", err)
+			lvl = 0
+		}
+	}
+	lvl += delta
+	if lvl < 0 {
+		lvl = 0
+	}
+	if lvl > 10 {
+		lvl = 10
+	}
+
+	volumeKeyMu.Lock()
+	volumeKeyLevel = lvl
+	volumeKeyMu.Unlock()
+
+	go func() {
+		if err := quasarVolumeSet(lvl * 10); err != nil {
+			log.Printf("громкость: кнопка: IPC не отправился: %v — пишу в ALSA", err)
+			if err := setAmixerPercent(lvl * 10); err != nil {
+				log.Printf("громкость: кнопка: ALSA не сработал: %v", err)
+				return
+			}
+		}
+		notifyVolume(lvl)
+		sendspinVolumeFromStation(lvl * 10)
+		log.Printf("громкость: кнопка %+d → уровень %d", delta, lvl)
+	}()
+}
+
 // setVolumePercentFromMA применяет громкость, пришедшую из Music Assistant.
 // Идём через maind, а не прямым amixer: иначе maind возвращает свой старый
 // логический уровень, и ползунок MA на колонке не держится.
 func setVolumePercentFromMA(percent int) error {
+	volumeKeyMu.Lock()
+	guard := time.Now().Before(volumeKeyGuard)
+	volumeKeyMu.Unlock()
+	if guard {
+		log.Printf("громкость: %d%% из MA пропущено — только что была кнопка", percent)
+		return nil
+	}
 	return setVolumePercent(percent, true)
 }
 
 func setVolumePercent(percent int, fromMA bool) error {
+	// Громкость сменили не кнопкой (голос, HA, MA) — цель кнопки устарела.
+	volumeKeyMu.Lock()
+	volumeKeyLevel = -1
+	volumeKeyMu.Unlock()
+
 	if fromMA {
 		markMAVolume()
 	} else {
@@ -286,6 +363,13 @@ func setVolumePercent(percent int, fromMA bool) error {
 		notifyVolumeFromMA(lvl)
 	} else {
 		notifyVolume(lvl)
+		// Кнопка/Алиса/настройки: MA должен узнать новый уровень, иначе
+		// ползунок на телефоне разъедется с колонкой.
+		pctForMA := volPercent
+		if pctForMA < 0 {
+			pctForMA = percent
+		}
+		sendspinVolumeFromStation(pctForMA)
 	}
 	return nil
 }

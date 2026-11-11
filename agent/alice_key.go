@@ -24,6 +24,13 @@ import (
 // KEY_ALICE — код кнопки Алисы в evdev.
 const keyAlice = 582
 
+// Кнопки громкости на том же sar0_pad0. EVIOCGRAB забирает устройство
+// целиком, поэтому maind их больше не видит — обрабатываем сами.
+const (
+	keyVolumeDown = 114
+	keyVolumeUp   = 115
+)
+
 // longPressAfter — порог длинного нажатия. Короткое — toggle владельца,
 // длинное — явное «Алиса». Автоповторов прошивка не шлёт, поэтому
 // длительность считается между нажатием и отпусканием.
@@ -146,7 +153,23 @@ type aliceButtonPress struct{}
 // watchAliceKey читает evdev и вызывает onPress на отпускание KEY_ALICE.
 // Признак long — нажатие держали не меньше longPressAfter.
 // Возвращает ошибку, если устройство пропало: вызывающий переходит на лог.
-func watchAliceKey(ctx context.Context, onPress func(long bool)) error {
+// volumeDelta переводит evdev-событие кнопки громкости в шаг ±1.
+// value 1 — нажатие, 2 — автоповтор при удержании, 0 — отпускание.
+func volumeDelta(code uint16, value int32) int {
+	if value != 1 && value != 2 {
+		return 0
+	}
+	switch code {
+	case keyVolumeUp:
+		return 1
+	case keyVolumeDown:
+		return -1
+	}
+	return 0
+}
+
+func watchAliceKey(ctx context.Context, onPress func(long bool),
+	onVolume func(delta int)) error {
 	dev, err := findAliceDevice()
 	if err != nil {
 		return err
@@ -192,7 +215,16 @@ func watchAliceKey(ctx context.Context, onPress func(long bool)) error {
 		}
 		for off := 0; off+inputEventSize <= n; off += inputEventSize {
 			typ, code, value := decodeKeyEvent(buf[off : off+inputEventSize])
-			if typ != 1 || code != keyAlice {
+			if typ != 1 {
+				continue
+			}
+			if code == keyVolumeUp || code == keyVolumeDown {
+				if d := volumeDelta(code, value); d != 0 && onVolume != nil {
+					onVolume(d)
+				}
+				continue
+			}
+			if code != keyAlice {
 				continue
 			}
 			if value == 1 {

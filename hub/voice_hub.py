@@ -81,6 +81,10 @@ CONNS: dict[str, "Conn"] = {}
 # чтобы `_on_phrase` не искал приложение по цепочке объектов.
 MQTT_BRIDGE = None
 
+# Действия, которые «включают звук». Долгое нажатие откладывает их до конца
+# объявления режима: иначе фраза звучит поверх уже играющей музыки.
+PLAY_ACTIONS = (sources.PLAY_ALICE, sources.PLAY_MA, sources.PLAY_AGENT)
+
 
 def match_intent(text: str, clean: str | None = None) -> str | None:
     """Каноническая фраза реестра, если распознанное совпало с интентом.
@@ -318,11 +322,25 @@ def should_resume_music(follow_up: bool, collecting: bool, state) -> bool:
 
 
 def wav_seconds(data: bytes) -> float:
-    """Длительность WAV-куска: по ней гасим кольцо, когда речь доиграет."""
+    """Длительность WAV-куска: по ней гасим кольцо, когда речь доиграет.
+
+    Заголовок может быть streaming: `RIFF` с размером 0xFFFFFFFF и
+    `nframes` = 0x7FFFFFFF. Тогда `wave` отдаёт 44739 с, и любое ожидание
+    «конца фразы» по этой цифре превращается в вечность (так объявление
+    режима блокировало включение музыки). В этом случае считаем по телу
+    файла: rate × каналы × ширину сэмпла.
+    """
     try:
         with wave.open(io.BytesIO(data)) as w:
             rate = w.getframerate() or 1
-            return w.getnframes() / rate
+            frames = w.getnframes()
+            if 0 < frames < 0xFFFFFFFF:
+                sec = frames / rate
+                if sec < 600:          # потоковый заголовок даёт десятки тысяч
+                    return sec
+            width = w.getsampwidth() or 2
+            channels = w.getnchannels() or 1
+            return max(0.0, len(data) - 44) / float(rate * channels * width)
     except Exception:  # noqa: BLE001
         return len(data) / 96000.0      # 48 кГц, 16 бит, моно
 
@@ -368,6 +386,13 @@ class Conn:
     # Ожидание подтверждения от MA: (состояние, дедлайн). Пока не истёк,
     # снимок источников держит намерение, а не старое состояние MA.
     _ma_pending: tuple[str, float] | None = None
+    # Ожидание конца короткого объявления (режим музыки): событие ставит
+    # `on_play_done`, а не оценка по длине WAV.
+    _announce_done: asyncio.Event | None = None
+    # Режим музыки: local (MA) / cloud (Алиса) / none. Не отдельный
+    # переключатель, а последний фактический владелец: по нему отвечаем на
+    # «какой режим работы» и публикуем retained-топик для HA.
+    mode = "none"
 
     def __init__(self, ws, name: str, role: str, cfg: CoreConfig,
                  gain: float, agc: bool, write_audio: bool):
@@ -458,6 +483,9 @@ class Conn:
         self.volume: int | None = None      # уровень 0..10, единый контракт
         self.volume_percent: int | None = None
         self.volume_db: float | None = None
+        # Последний режим переживает рестарт хаба: иначе на вопрос «какой
+        # режим работы» после перезапуска ответить нечем.
+        self.mode = self._load_mode()
 
         self.core = SpeechCore(
             wake=LocalWakeGate(threshold=cfg.wake_threshold),
@@ -505,6 +533,12 @@ class Conn:
         как мы закончили отправку. Иначе кольцо гасло и музыка возвращалась
         ровно на том же длинном ответе, ради которого всё делалось.
         """
+        done = getattr(self, "_announce_done", None)
+        if done is not None:
+            # Идёт короткое объявление режима: этот play_done относится к
+            # нему, и ждать его — единственный правильный конец фразы.
+            done.set()
+            return
         if self._sending_audio:
             log.debug("%s: play_done в промежутке между кусками — игнор", self.name)
             return
@@ -1265,7 +1299,12 @@ class Conn:
             # Снимок в лог: без него не видно, почему кнопка решила «тишина»,
             # когда музыка играет.
             log.info("%s: кнопка, снимок %s", self.name, self._sources)
-            actions = await self._reconcile("switch_source" if long else "button")
+            before = self._sources.owner
+            empty_before = self._sources.ma_queue == "empty"
+            # Долгое нажатие сначала объявляет режим и только потом включает
+            # звук: иначе фраза звучит поверх уже играющей музыки.
+            actions = await self._reconcile("switch_source" if long else "button",
+                                            defer_play=long)
             # Запрет на автовозврат нужен только когда кнопка действительно
             # поставила паузу. Если она вернула владельца (play_*), музыка уже
             # звучит, и запрет лишь оставил бы её немой после ложной активации.
@@ -1286,7 +1325,29 @@ class Conn:
                 await self.command({"cmd": "native_pause"}, timeout=5)
             elif not long and sources.PLAY_MA in actions:
                 self._button_guard_until = time.monotonic() + BUTTON_GUARD
-            await self.command({"cmd": "led", "name": ""}, timeout=10)
+            if long:
+                phrase = self._mode_phrase(actions, before, empty_before)
+                if phrase:
+                    owner = self._sources.owner
+                    mode_led = ("hermes_mode_local" if owner == sources.MA
+                                else "hermes_mode_cloud"
+                                if owner == sources.ALICE else "")
+                    if mode_led:
+                        # Кольцо показывает целевой режим на время фразы:
+                        # local — зелёный, cloud — фиолетовый Алисы.
+                        await self.command({"cmd": "led", "name": mode_led},
+                                           timeout=10)
+                    await self._announce(phrase)
+                plays = [a for a in actions if a in PLAY_ACTIONS]
+                if plays:
+                    await self._apply(plays)
+                await self.command({"cmd": "led", "name": ""}, timeout=10)
+            else:
+                # Короткое нажатие подтверждаем розовой вспышкой, как Алиса.
+                # На micro это .led-анимация, на plum — статический цвет с
+                # таймаутом: файлов .led там нет.
+                await self.command({"cmd": "led", "name": "hermes_pause",
+                                    "timeout": 1}, timeout=10)
 
     # ---------- цикл соединения ----------
 
@@ -1439,38 +1500,66 @@ class Conn:
                             self.name, act, e)
 
     async def _sync_sources_snapshot(self) -> None:
-        """Снять факты у MA перед решением (кнопка, возврат музыки).
+        """Снять факты у агента и MA перед решением (кнопка, возврат музыки).
 
-        Локальный снимок знает только то, что делали мы. Пауза из
-        приложения/с ПК видна лишь в самом MA. Состояние Алисы здесь не
-        нужно: её плеером занимается maind, мы кнопку в его режиме не трогаем.
+        Запросы идут параллельно: последовательный опрос MA добавлял к
+        решению кнопки полсекунды, и за это время картина успевала
+        измениться. Состояние нативного плеера нужно именно здесь: пауза
+        могла быть поставлена из приложения или с ПК, а локальный снимок
+        хаба о ней не знает.
         """
-        try:
-            st = await ma_control.player_state(self.name)
-        except Exception as e:  # noqa: BLE001
-            log.warning("%s: состояние MA не получено: %s", self.name, e)
-            return
-        if st == "playing":
-            self._sources.ma = sources.PLAYING
-            self._sources.agent = sources.STREAMING
-        elif st == "paused":
-            self._sources.ma = sources.PAUSED
-        elif st in ("idle", "off"):
-            # idle после pause с ПК тоже значит «продолжать есть что».
-            if self._sources.ma == sources.PLAYING:
-                self._sources.ma = sources.PAUSED
-        # MA отвечает не сразу: пока ждём подтверждения, держим намерение,
-        # иначе быстрый повторный клик увидит старое состояние.
-        pend = self._ma_pending
-        if pend:
-            want, until = pend
-            if st == want or time.monotonic() > until:
-                self._ma_pending = None
-            elif want == "paused":
-                self._sources.ma = sources.PAUSED
-            else:
+        res, st = await asyncio.gather(
+            self.command({"cmd": "state"}, timeout=2),
+            ma_control.player_state(self.name),
+            return_exceptions=True,
+        )
+        native = spin = None
+        if isinstance(res, Exception):
+            log.warning("%s: состояние агента не получено: %s", self.name, res)
+        else:
+            if isinstance(res, dict) and res.get("ok"):
+                # null значит «агент не знает»: это не факт «не играет», иначе
+                # снимок снова начнёт врать в сторону тишины и кнопка включит
+                # музыку вместо паузы.
+                native = res.get("native_playing")
+                spin = res.get("sendspin_playing")
+                if native is True:
+                    self._sources.alice = sources.PLAYING
+                elif native is False and self._sources.alice == sources.PLAYING:
+                    self._sources.alice = sources.PAUSED
+        if isinstance(st, Exception):
+            log.warning("%s: состояние MA не получено: %s", self.name, st)
+        else:
+            if st == "playing":
                 self._sources.ma = sources.PLAYING
-                self._sources.agent = sources.STREAMING
+                # «MA играет» не значит «звук слышен»: наш aplay мог умереть
+                # (file already closed / underrun). Тогда agent — не streaming,
+                # иначе кнопка паузит поток, которого нет, а снимок врёт.
+                if spin is True:
+                    self._sources.agent = sources.STREAMING
+                elif spin is False:
+                    self._sources.agent = sources.PAUSED
+            elif st == "paused":
+                self._sources.ma = sources.PAUSED
+            elif st in ("idle", "off"):
+                # idle после pause с ПК тоже значит «продолжать есть что».
+                if self._sources.ma == sources.PLAYING:
+                    self._sources.ma = sources.PAUSED
+            # MA отвечает не сразу: пока ждём подтверждения, держим намерение,
+            # иначе быстрый повторный клик увидит старое состояние.
+            pend = self._ma_pending
+            if pend:
+                want, until = pend
+                if st == want or time.monotonic() > until:
+                    self._ma_pending = None
+                elif want == "paused":
+                    self._sources.ma = sources.PAUSED
+                else:
+                    self._sources.ma = sources.PLAYING
+                    if spin is True:
+                        self._sources.agent = sources.STREAMING
+                    elif spin is False:
+                        self._sources.agent = sources.PAUSED
         try:
             n = await ma_control.queue_len(self.name)
         except Exception as e:  # noqa: BLE001
@@ -1481,17 +1570,108 @@ class Conn:
         elif n > 0:
             self._sources.ma_queue = "filled"
 
-    async def _reconcile(self, event: str) -> list[str]:
-        """Пропустить событие через автомат и исполнить решение."""
+    # ---------- режим музыки ----------
+
+    def _mode_file(self) -> str:
+        folder = config.get("mode", "dir", default="/srv/hermes-station/state")
+        return os.path.join(str(folder), f"mode-{self.name}.json")
+
+    def _load_mode(self) -> str:
+        """Последний режим с диска: переживает рестарт хаба."""
+        try:
+            with open(self._mode_file(), encoding="utf-8") as f:
+                mode = str((json.load(f) or {}).get("mode") or "none")
+        except (OSError, ValueError):
+            return "none"
+        return mode if mode in ("local", "cloud") else "none"
+
+    def _save_mode(self, mode: str) -> None:
+        path = self._mode_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"mode": mode}, f)
+            os.replace(tmp, path)
+        except OSError as e:  # noqa: BLE001
+            log.debug("%s: режим не сохранён: %s", self.name, e)
+
+    def _set_mode(self, owner: str) -> None:
+        """Обновить режим по фактическому владельцу и отдать его в HA."""
+        mode = {sources.MA: "local", sources.ALICE: "cloud"}.get(owner)
+        if not mode or mode == self.mode:
+            return
+        self.mode = mode
+        self._save_mode(mode)
+        if MQTT_BRIDGE is not None:
+            try:
+                MQTT_BRIDGE.publish_mode(self.name, mode)
+            except Exception as e:  # noqa: BLE001
+                log.debug("%s: режим не опубликован: %s", self.name, e)
+        log.info("%s: режим музыки → %s", self.name, mode)
+
+    async def _announce(self, text: str) -> None:
+        """Короткая фраза из библиотеки: без LED, окна диалога и LLM."""
+        data = replies.audio(text)
+        if data is None:
+            try:
+                data = await asyncio.to_thread(voice_dialog.synthesize, text)
+                replies.store(text, data)
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: фраза %r не синтезирована: %s", self.name, text, e)
+                return
+        # Конец фразы — по подтверждению колонки (`play_done`), а не по
+        # длине WAV: у потокового заголовка nframes = 0x7FFFFFFF, и расчёт
+        # давал 44739 с — объявление блокировало включение музыки навсегда.
+        done = asyncio.Event()
+        self._announce_done = done
+        try:
+            await self.command({"cmd": "say", "volume": voice_dialog.SAY_VOLUME},
+                               timeout=10)
+            await self.send_binary(data)
+            limit = min(max(wav_seconds(data), 0.5), 15.0) + 2.0
+            try:
+                await asyncio.wait_for(done.wait(), timeout=limit)
+            except asyncio.TimeoutError:
+                log.warning("%s: конец фразы %r не подтверждён за %.1f с — продолжаю",
+                            self.name, text, limit)
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: фраза не озвучена: %s", self.name, e)
+        finally:
+            self._announce_done = None
+
+    def _mode_phrase(self, actions: list[str], before: str,
+                     empty_before: bool) -> str:
+        """Что сказать после переключения: по новому владельцу, не по плану."""
+        if empty_before and before != sources.MA:
+            if sources.PLAY_ALICE in actions:
+                return "Локальная очередь пуста, включаю облачную музыку"
+            return "Локальная очередь пуста"
+        if self._sources.owner == sources.MA:
+            return "Включена локальная музыка"
+        if self._sources.owner == sources.ALICE:
+            return "Включена облачная музыка"
+        return ""
+
+    async def _reconcile(self, event: str, defer_play: bool = False) -> list[str]:
+        """Пропустить событие через автомат и исполнить решение.
+
+        defer_play — не включать звук сразу: вызывающий сначала объявит
+        режим и только потом пришлёт PLAY_* через `_apply`.
+        """
         dec = sources.decide(self._sources, event)
         self._sources = dec.sources
         if dec.actions:
             log.info("%s: %s → %s", self.name, event, ", ".join(dec.actions))
-        await self._apply(dec.actions)
+        if defer_play:
+            await self._apply([a for a in dec.actions if a not in PLAY_ACTIONS])
+        else:
+            await self._apply(dec.actions)
         # Держим старые флаги в согласии со снимком: на них ещё завязаны
         # возврат музыки и выбор команды play/pause.
         self._ma_paused = dec.sources.ma == sources.PAUSED
         self._agent_sendspin = dec.sources.agent == sources.PAUSED
+        self._set_mode(dec.sources.owner)
         return dec.actions
 
     async def _handle_overlap(self, native: bool, spin: bool,
