@@ -37,7 +37,19 @@ jobs:
         # только в файле — без него модуль честно отказывается стартовать.
         env:
           HUB_CONFIG: ${{ github.workspace }}/hub/config.example.json
-        run: python -m unittest discover -s hub/tests -t .
+        # Полный лог в файл: без него падение на раннере видно только как
+        # «exit code 1», а анонимно логи GitHub не отдаёт. Хвост и список
+        # упавших тестов уходят в аннотацию, которую видно без авторизации.
+        run: |
+          set +e
+          python -m unittest discover -s hub/tests -t . -v > /tmp/tests.log 2>&1
+          code=$?
+          tail -40 /tmp/tests.log
+          if [ $code -ne 0 ]; then
+            echo "::error title=Провал тестов::$(grep -aE '^(FAIL|ERROR):' /tmp/tests.log | head -10 | tr '\n' ';')"
+            echo "::error title=Хвост лога::$(tail -20 /tmp/tests.log | tr '\n' '|')"
+          fi
+          exit $code
 
   lint:
     name: Линт (мёртвый код)
